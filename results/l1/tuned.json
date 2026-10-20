@@ -1,0 +1,42 @@
+{
+ "glft": {
+  "beta": 0.01,
+  "beta_unrep": 100,
+  "beta_distill": 4
+ },
+ "glft-unfactored": {
+  "beta": 0.01,
+  "beta_unrep": 100,
+  "beta_distill": 8
+ },
+ "fbc-verifier": {
+  "beta": 0.003
+ },
+ "fbc-all_positive": {
+  "beta": 2
+ },
+ "grpo-bin": {
+  "lr": 30000
+ },
+ "grpo-frac": {
+  "lr": 300
+ },
+ "grpo-parse": {
+  "lr": 100
+ },
+ "grpo-align": {
+  "lr": 10000
+ },
+ "rloo-bin": {
+  "lr": 100000
+ },
+ "rloo-frac": {
+  "lr": 1000
+ },
+ "rloo-parse": {
+  "lr": 300
+ },
+ "rloo-align": {
+  "lr": 10000
+ }
+}

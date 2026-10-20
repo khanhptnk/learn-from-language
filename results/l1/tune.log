@@ -1,0 +1,13 @@
+1107 runs in 316s
+glft                 best={'beta': 0.01, 'beta_unrep': 100, 'beta_distill': 4} auc=0.919 per_env=[np.float64(0.96), np.float64(0.925), np.float64(0.872)]  [at grid edge]
+glft-unfactored      best={'beta': 0.01, 'beta_unrep': 100, 'beta_distill': 8} auc=0.684 per_env=[np.float64(0.943), np.float64(0.865), np.float64(0.244)]  [at grid edge]
+fbc-verifier         best={'beta': 0.003} auc=0.509 per_env=[np.float64(0.977), np.float64(0.55), np.float64(0.0)]  [at grid edge]
+fbc-all_positive     best={'beta': 2} auc=0.243 per_env=[np.float64(0.564), np.float64(0.153), np.float64(0.012)]
+grpo-bin             best={'lr': 30000} auc=0.507 per_env=[np.float64(0.973), np.float64(0.518), np.float64(0.029)]
+grpo-frac            best={'lr': 300} auc=0.918 per_env=[np.float64(0.979), np.float64(0.923), np.float64(0.853)]
+grpo-parse           best={'lr': 100} auc=0.696 per_env=[np.float64(0.92), np.float64(0.629), np.float64(0.539)]
+grpo-align           best={'lr': 10000} auc=0.965 per_env=[np.float64(0.984), np.float64(0.975), np.float64(0.938)]
+rloo-bin             best={'lr': 100000} auc=0.507 per_env=[np.float64(0.973), np.float64(0.518), np.float64(0.029)]  [at grid edge]
+rloo-frac            best={'lr': 1000} auc=0.911 per_env=[np.float64(0.975), np.float64(0.897), np.float64(0.861)]
+rloo-parse           best={'lr': 300} auc=0.684 per_env=[np.float64(0.914), np.float64(0.605), np.float64(0.534)]
+rloo-align           best={'lr': 10000} auc=0.965 per_env=[np.float64(0.984), np.float64(0.975), np.float64(0.938)]

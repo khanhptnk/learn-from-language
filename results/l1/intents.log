@@ -1,0 +1,146 @@
+tuning: 5832 runs in 3129s
+total 4137s
+
+(b, k)=(64, 1) H=4 q=0.02   final success @65k episodes | median episodes-to-90%
+  oracle references: rloo-frac: 0.83|-  grpo-frac: 0.67|-  fbc-verifier: 0.00|-  grpo-align: 1.00|25k
+     profile              glft        grpo-parse        rloo-parse
+    reporter       0.98 |  14k       0.34 |    -       0.28 |    -  
+      grader       0.00 |    -       0.34 |    -       0.28 |    -  
+   explainer       0.98 |  14k       0.34 |    -       0.28 |    -  
+       coach       0.00 |    -       0.34 |    -       0.28 |    -  
+      scorer       0.00 |    -       0.87 |    -       0.83 |    -  
+       vague       0.00 |    -       0.00 |    -       0.00 |    -  
+       mixed       0.97 |  23k       0.24 |    -       0.18 |    -  
+     desc0.0       0.00 |    -       0.34 |    -       0.28 |    -  
+     desc0.1       0.58 |    -       0.34 |    -       0.28 |    -  
+    desc0.25       0.86 |    -       0.34 |    -       0.28 |    -  
+     desc0.5       0.97 |  23k       0.34 |    -       0.28 |    -  
+     desc1.0       0.98 |  14k       0.34 |    -       0.28 |    -  
+
+(b, k)=(64, 1) H=4 q=0.1   final success @65k episodes | median episodes-to-90%
+  oracle references: rloo-frac: 0.99|16k  grpo-frac: 0.96|23k  fbc-verifier: 0.52|-  grpo-align: 1.00|6k
+     profile              glft        grpo-parse        rloo-parse
+    reporter       0.98 |  14k       0.85 |    -       0.89 |    -  
+      grader       0.28 |    -       0.85 |    -       0.89 |    -  
+   explainer       0.98 |  14k       0.85 |    -       0.89 |    -  
+       coach       0.28 |    -       0.85 |    -       0.89 |    -  
+      scorer       0.00 |    -       0.97 |  23k       0.99 |  16k  
+       vague       0.00 |    -       0.00 |    -       0.00 |    -  
+       mixed       0.98 |  20k       0.72 |    -       0.81 |    -  
+     desc0.0       0.28 |    -       0.85 |    -       0.89 |    -  
+     desc0.1       0.78 |    -       0.85 |    -       0.89 |    -  
+    desc0.25       0.93 |  29k       0.85 |    -       0.89 |    -  
+     desc0.5       0.99 |  20k       0.85 |    -       0.89 |    -  
+     desc1.0       0.98 |  14k       0.85 |    -       0.89 |    -  
+
+(b, k)=(64, 1) H=4 q=0.35   final success @65k episodes | median episodes-to-90%
+  oracle references: rloo-frac: 0.99|8k  grpo-frac: 1.00|6k  fbc-verifier: 1.00|4k  grpo-align: 1.00|4k
+     profile              glft        grpo-parse        rloo-parse
+    reporter       0.99 |  12k       0.94 |  41k       0.86 |    -  
+      grader       0.97 |  23k       0.94 |  41k       0.86 |    -  
+   explainer       0.99 |  12k       0.94 |  41k       0.86 |    -  
+       coach       0.97 |  23k       0.94 |  41k       0.86 |    -  
+      scorer       0.02 |    -       1.00 |   6k       0.99 |   8k  
+       vague       0.05 |    -       0.02 |    -       0.02 |    -  
+       mixed       0.99 |  18k       0.86 |    -       0.91 |  55k  
+     desc0.0       0.97 |  23k       0.94 |  41k       0.86 |    -  
+     desc0.1       0.99 |  20k       0.94 |  41k       0.86 |    -  
+    desc0.25       0.93 |  16k       0.94 |  41k       0.86 |    -  
+     desc0.5       0.97 |  12k       0.94 |  41k       0.86 |    -  
+     desc1.0       0.99 |  12k       0.94 |  41k       0.86 |    -  
+
+(b, k)=(4, 3) H=12 q=0.02   final success @65k episodes | median episodes-to-90%
+  oracle references: rloo-frac: 0.59|-  grpo-frac: 0.34|-  fbc-verifier: 0.00|-  grpo-align: 1.00|25k
+     profile              glft        grpo-parse        rloo-parse
+    reporter       0.98 |  10k       0.18 |    -       0.14 |    -  
+      grader       0.04 |    -       0.18 |    -       0.14 |    -  
+   explainer       0.98 |  10k       0.18 |    -       0.14 |    -  
+       coach       0.04 |    -       0.18 |    -       0.14 |    -  
+      scorer       0.00 |    -       0.67 |    -       0.62 |    -  
+       vague       0.00 |    -       0.00 |    -       0.00 |    -  
+       mixed       0.97 |  16k       0.14 |    -       0.21 |    -  
+     desc0.0       0.04 |    -       0.18 |    -       0.14 |    -  
+     desc0.1       0.79 |    -       0.18 |    -       0.14 |    -  
+    desc0.25       0.96 |  29k       0.18 |    -       0.14 |    -  
+     desc0.5       0.98 |  16k       0.18 |    -       0.14 |    -  
+     desc1.0       0.98 |  10k       0.18 |    -       0.14 |    -  
+
+(b, k)=(4, 3) H=12 q=0.1   final success @65k episodes | median episodes-to-90%
+  oracle references: rloo-frac: 0.92|51k  grpo-frac: 0.77|-  fbc-verifier: 0.19|-  grpo-align: 1.00|8k
+     profile              glft        grpo-parse        rloo-parse
+    reporter       0.99 |  10k       0.60 |    -       0.74 |    -  
+      grader       0.53 |    -       0.60 |    -       0.74 |    -  
+   explainer       0.99 |  10k       0.60 |    -       0.74 |    -  
+       coach       0.53 |    -       0.60 |    -       0.74 |    -  
+      scorer       0.00 |    -       0.96 |  35k       0.93 |  49k  
+       vague       0.00 |    -       0.00 |    -       0.00 |    -  
+       mixed       0.96 |  16k       0.49 |    -       0.64 |    -  
+     desc0.0       0.53 |    -       0.60 |    -       0.74 |    -  
+     desc0.1       0.89 |    -       0.60 |    -       0.74 |    -  
+    desc0.25       0.98 |  25k       0.60 |    -       0.74 |    -  
+     desc0.5       0.97 |  16k       0.60 |    -       0.74 |    -  
+     desc1.0       0.99 |  10k       0.60 |    -       0.74 |    -  
+
+(b, k)=(4, 3) H=12 q=0.35   final success @65k episodes | median episodes-to-90%
+  oracle references: rloo-frac: 0.98|14k  grpo-frac: 0.97|14k  fbc-verifier: 1.00|4k  grpo-align: 1.00|4k
+     profile              glft        grpo-parse        rloo-parse
+    reporter       0.98 |   8k       0.85 |    -       0.87 |    -  
+      grader       0.98 |  23k       0.85 |    -       0.87 |    -  
+   explainer       0.98 |   8k       0.85 |    -       0.87 |    -  
+       coach       0.98 |  23k       0.85 |    -       0.87 |    -  
+      scorer       0.02 |    -       0.98 |  12k       0.98 |  14k  
+       vague       0.05 |    -       0.02 |    -       0.02 |    -  
+       mixed       0.95 |  16k       0.75 |    -       0.82 |    -  
+     desc0.0       0.98 |  23k       0.85 |    -       0.87 |    -  
+     desc0.1       0.93 |  16k       0.85 |    -       0.87 |    -  
+    desc0.25       0.96 |  14k       0.85 |    -       0.87 |    -  
+     desc0.5       0.99 |  12k       0.85 |    -       0.87 |    -  
+     desc1.0       0.98 |   8k       0.85 |    -       0.87 |    -  
+
+(b, k)=(2, 6) H=24 q=0.02   final success @65k episodes | median episodes-to-90%
+  oracle references: rloo-frac: 0.51|-  grpo-frac: 0.27|-  fbc-verifier: 0.00|-  grpo-align: 1.00|25k
+     profile              glft        grpo-parse        rloo-parse
+    reporter       0.99 |  10k       0.18 |    -       0.23 |    -  
+      grader       0.07 |    -       0.18 |    -       0.23 |    -  
+   explainer       0.99 |  10k       0.18 |    -       0.23 |    -  
+       coach       0.07 |    -       0.18 |    -       0.23 |    -  
+      scorer       0.00 |    -       0.58 |    -       0.68 |    -  
+       vague       0.00 |    -       0.00 |    -       0.00 |    -  
+       mixed       0.99 |  16k       0.12 |    -       0.19 |    -  
+     desc0.0       0.07 |    -       0.18 |    -       0.23 |    -  
+     desc0.1       0.83 |    -       0.18 |    -       0.23 |    -  
+    desc0.25       0.87 |    -       0.18 |    -       0.23 |    -  
+     desc0.5       0.98 |  16k       0.18 |    -       0.23 |    -  
+     desc1.0       0.99 |  10k       0.18 |    -       0.23 |    -  
+
+(b, k)=(2, 6) H=24 q=0.1   final success @65k episodes | median episodes-to-90%
+  oracle references: rloo-frac: 0.87|-  grpo-frac: 0.73|-  fbc-verifier: 0.17|-  grpo-align: 1.00|6k
+     profile              glft        grpo-parse        rloo-parse
+    reporter       0.99 |  10k       0.56 |    -       0.69 |    -  
+      grader       0.65 |    -       0.56 |    -       0.69 |    -  
+   explainer       0.99 |  10k       0.56 |    -       0.69 |    -  
+       coach       0.65 |    -       0.56 |    -       0.69 |    -  
+      scorer       0.00 |    -       0.94 |  45k       0.86 |    -  
+       vague       0.00 |    -       0.00 |    -       0.00 |    -  
+       mixed       0.99 |  16k       0.43 |    -       0.57 |    -  
+     desc0.0       0.65 |    -       0.56 |    -       0.69 |    -  
+     desc0.1       0.93 |  35k       0.56 |    -       0.69 |    -  
+    desc0.25       0.99 |  25k       0.56 |    -       0.69 |    -  
+     desc0.5       0.98 |  16k       0.56 |    -       0.69 |    -  
+     desc1.0       0.99 |  10k       0.56 |    -       0.69 |    -  
+
+(b, k)=(2, 6) H=24 q=0.35   final success @65k episodes | median episodes-to-90%
+  oracle references: rloo-frac: 0.97|20k  grpo-frac: 0.97|20k  fbc-verifier: 1.00|4k  grpo-align: 1.00|4k
+     profile              glft        grpo-parse        rloo-parse
+    reporter       0.98 |  10k       0.82 |    -       0.82 |    -  
+      grader       0.99 |  23k       0.82 |    -       0.82 |    -  
+   explainer       0.98 |  10k       0.82 |    -       0.82 |    -  
+       coach       0.99 |  23k       0.82 |    -       0.82 |    -  
+      scorer       0.02 |    -       0.96 |  20k       0.97 |  20k  
+       vague       0.05 |    -       0.02 |    -       0.02 |    -  
+       mixed       0.96 |  16k       0.70 |    -       0.75 |    -  
+     desc0.0       0.99 |  23k       0.82 |    -       0.82 |    -  
+     desc0.1       0.96 |  16k       0.82 |    -       0.82 |    -  
+    desc0.25       0.98 |  14k       0.82 |    -       0.82 |    -  
+     desc0.5       0.99 |  14k       0.82 |    -       0.82 |    -  
+     desc1.0       0.98 |  10k       0.82 |    -       0.82 |    -  
