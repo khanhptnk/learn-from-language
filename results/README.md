@@ -12,3 +12,8 @@ Summaries of finished runs. Raw per-run JSON lives in the gitignored `outputs/`.
 | `l1/intents_rerun_scorer_vague.log` | GLFT re-tuned for scorer/vague after the EVAL = m fix (supersedes those rows above) | `uv run python experiments/l1/intents_l1.py rerun` |
 
 All L1 runs use tabular, count-based learners (`glft/l1_tabular.py`, `glft/l1_horizon.py`, `glft/l1_intents.py`).
+| `l1/intents_extend.log` | Batch GLFT with distribution distillation (`glft-dist`, proposed) and RL with the optimistic parser | `uv run python experiments/l1/intents_l1.py extend` |
+| `l1/verify_intents_exact.log` | Exact-population convergence for every intent profile, chatter-only, liars, style preferences | `uv run python experiments/l1/verify_intents_exact.py` |
+| `l1/sgd_regime.txt`, `l1/sgd_horizon.txt`, `l1/sgd_intents.txt`, `l1/sgd_intents_compact.txt` | **Incremental GLFT (`glft-sgd`, batched Online GLFT, paper Algorithm 2) -- the method under test from here on** | `uv run python experiments/l1/online_l1.py {regime,horizon,intents}` |
+
+Earlier L1 GLFT results (`glft`, `glft-dist`) use count-based full refits with replay (Algorithm 1 style) and are kept as references.

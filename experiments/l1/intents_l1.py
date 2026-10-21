@@ -36,6 +36,13 @@ GRIDS = {
     "rloo-parse": [dict(lr=lr) for lr in (30, 100, 300, 1000, 3000, 10000)],
 }
 ORACLES = ["rloo-frac", "grpo-frac", "fbc-verifier", "grpo-align"]
+# Arms added after the first sweep: the proposed GLFT variant, and RL with the optimistic parser.
+ARM_ALIAS = {"grpo-parse-opt": "grpo-parse", "rloo-parse-opt": "rloo-parse"}
+EXTRA_GRIDS = {
+    "glft-dist": [dict(beta=0.01, beta_unrep=bu, beta_distill=bd) for bu in (1, 10, 100) for bd in (1, 4)],
+    "grpo-parse-opt": [dict(lr=lr, parser="optimistic") for lr in (100, 300, 1000, 3000)],
+    "rloo-parse-opt": [dict(lr=lr, parser="optimistic") for lr in (100, 300, 1000, 3000)],
+}
 
 
 def summarize_curve(c):
@@ -50,7 +57,7 @@ def job(spec):
     if kind == "oracle":
         c = run_h(arm, env, seed=seed, budget=65536, eval_every=2048, overrides=o)
     else:
-        c = run(arm, env, PROFS[prof], seed=seed, overrides=o)
+        c = run(ARM_ALIAS.get(arm, arm), env, PROFS[prof], seed=seed, overrides=o)
     return dict(kind=kind, arm=arm, profile=prof, N=list(bk), q=q, seed=seed, overrides=o, **summarize_curve(c))
 
 
@@ -82,6 +89,23 @@ def rerun_profiles(procs, names):
                     for s in range(5)], procs, "eval")
     res = [r for r in json.loads((OUT / "intents.json").read_text())
            if not (r["arm"] == "glft" and r["profile"] in names)] + new
+    (OUT / "intents.json").write_text(json.dumps(res))
+    summary(res)
+
+
+def extend(procs):
+    """Tune + evaluate EXTRA_GRIDS arms on every profile and cell; merge into intents.json."""
+    specs = [("prof", arm, p, N, q, s, o) for p in PROFS for (N, q) in CELLS for arm, grid in EXTRA_GRIDS.items()
+             for o in grid for s in (100, 101, 102)]
+    tuned = pool_map(specs, procs, "tune")
+    best = {}
+    for r in tuned:
+        best.setdefault((r["arm"], r["profile"], tuple(r["N"]), r["q"]), {}).setdefault(
+            json.dumps(r["overrides"], sort_keys=True), []).append(r["auc"])
+    choice = {k: json.loads(max(v, key=lambda o: np.mean(v[o]))) for k, v in best.items()}
+    new = pool_map([("prof", arm, p, N, q, s, choice[(arm, p, N, q)]) for p in PROFS for (N, q) in CELLS
+                    for arm in EXTRA_GRIDS for s in range(5)], procs, "eval")
+    res = [r for r in json.loads((OUT / "intents.json").read_text()) if r["arm"] not in EXTRA_GRIDS] + new
     (OUT / "intents.json").write_text(json.dumps(res))
     summary(res)
 
@@ -119,17 +143,24 @@ def summary(res):
         print(f"\n(b, k)={N} H={M * N[1]} q={q}   final success @65k episodes | median episodes-to-90%")
         orc = "  ".join(f"{a}: {cell(a, '-', N, q, 'final'):.2f}|{fmt_t(cell(a, '-', N, q, 'to90'))}" for a in ORACLES)
         print(f"  oracle references: {orc}")
-        print(f"  {'profile':>10}  " + "  ".join(f"{a:>16}" for a in GRIDS))
+        cols = ["glft", "glft-dist", "best RL-parse"]
+        print(f"  {'profile':>10}  " + "  ".join(f"{a:>16}" for a in cols) + "   (RL-parse arm chosen)")
         for p in PROFS:
             line = f"  {p:>10}  "
-            for a in GRIDS:
+            rl_arms = [a for a in ("grpo-parse", "rloo-parse", "grpo-parse-opt", "rloo-parse-opt")
+                       if any(r["arm"] == a and r["profile"] == p for r in res)]
+            best_rl = max(rl_arms, key=lambda a: cell(a, p, N, q, "auc"))
+            for a in ["glft", "glft-dist", best_rl]:
+                if not any(r["arm"] == a for r in res):
+                    line += f"{'':>16}  "
+                    continue
                 line += f"{cell(a, p, N, q, 'final'):>9.2f} | {fmt_t(cell(a, p, N, q, 'to90')):>4}  "
-            print(line)
+            print(line + f"   {best_rl}")
 
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("what", choices=["run", "summary", "rerun"])
+    ap.add_argument("what", choices=["run", "summary", "rerun", "extend"])
     ap.add_argument("--profiles", nargs="*", default=["scorer", "vague"])
     ap.add_argument("--procs", type=int, default=8)
     a = ap.parse_args()
@@ -137,6 +168,8 @@ def main():
         main_run(a.procs)
     elif a.what == "rerun":
         rerun_profiles(a.procs, a.profiles)
+    elif a.what == "extend":
+        extend(a.procs)
     else:
         summary(json.loads((OUT / "intents.json").read_text()))
 

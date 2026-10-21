@@ -37,11 +37,20 @@ from dataclasses import dataclass, field
 import numpy as np
 
 from glft.l1_horizon import HEnv, HWorld, PolicyGradient, RLConfig, conditionals, smooth_steps
+
+
+def path_table(P):
+    """Per-step tables [(K, N, b^i, b)] -> full path distribution (K, N, b^k)."""
+    cur = P[0][:, :, 0, :]
+    for Pi in P[1:]:
+        cur = (cur[..., None] * Pi).reshape(cur.shape[0], cur.shape[1], -1)
+    return cur
 from glft.l1_tabular import Resources
 
 NONE, DESC, CONFIRM, CORRECT, DIAG, CONTRAST, HINT = range(7)
 INTENT_NAMES = ["none", "desc", "confirm", "correct", "diag", "contrast", "hint"]
 REVEALS_OUTCOME = {DESC, CONFIRM, DIAG, CONTRAST}
+FAILURE_ONLY = [CORRECT, DIAG, CONTRAST, HINT]
 N_GROUPS = 4
 
 
@@ -132,6 +141,8 @@ class GLFTConfig:
     beta_unrep: float = 100.0
     beta_distill: float = 4.0
     replay_unrep: bool = False  # accumulate non-revealing signature cells over rounds (theory: current round)
+    distill: str = "sample"     # "sample": MLE on sampled X+ (the paper's Stage II)
+                                # "dist":   PROPOSED VARIANT, distill pi^fb's full distribution (soft counts)
 
 
 class GLFT:
@@ -162,43 +173,65 @@ class GLFT:
         # Stage II: ideal feedback = the teacher on an all-satisfied execution.
         s2, t2 = w.requests(c.stage2_per_round)
         star = teach(w.rng, prof, s2, t2, t2)
+        self.res.env_episodes += len(s2)
+        self.res.gstar_samples += len(s2)
+        if c.distill == "dist":
+            # Soft counts: each Stage II requirement contributes pi^fb's whole path distribution under F*.
+            tables = [path_table(fb_rep), path_table(fb_unrep[0]), path_table(fb_unrep[1])]
+            which = np.where(star.revealed >= 0, 0, np.where((star.eval == e.m)[:, None], 2, 1))
+            D = np.zeros_like(self.ground)
+            for i, tab in enumerate(tables):
+                sel = which == i
+                np.add.at(D, (s2[sel], t2[sel]), tab[s2[sel], t2[sel]])
+            self.P = smooth_steps(D, self.P, c.beta_distill, h.b, h.k)
+            return
         a_rep = w.act_steps(fb_rep, s2, t2)
         a_u0 = w.act_steps(fb_unrep[0], s2, t2)
         a_u1 = w.act_steps(fb_unrep[1], s2, t2)
         a2 = np.where(star.revealed >= 0, a_rep, np.where((star.eval == e.m)[:, None], a_u1, a_u0))
-        self.res.env_episodes += len(s2)
-        self.res.gstar_samples += len(s2)
         D = np.zeros_like(self.ground)
         np.add.at(D, (s2, t2, a2), 1)
         self.P = smooth_steps(D, self.P, c.beta_distill, h.b, h.k)
 
 
 class ParsePG(PolicyGradient):
-    """RL whose reward is parsed from the same mixed-intent teacher message (information-matched):
-    the exact fraction if EVAL is present, else the fraction of requirements known satisfied."""
+    """RL whose reward is parsed from the same mixed-intent teacher message (information-matched).
 
-    def __init__(self, world, P0, prof: Profile, cfg: RLConfig):
+    The exact fraction if EVAL is present; otherwise
+      pessimistic: fraction of requirements known satisfied (unmentioned count as failed);
+      optimistic:  1 - fraction known or flagged failed (unmentioned count as satisfied; a VAGUE
+                   complaint counts as one failure), so silence reads as success.
+    """
+
+    def __init__(self, world, P0, prof: Profile, cfg: RLConfig, parser="pessimistic"):
         super().__init__(world, P0, cfg)
-        self.prof = prof
+        self.prof, self.parser = prof, parser
 
     def _reward(self, slots, targets, outc):
         m = self.w.env.m
         msg = teach(self.w.rng, self.prof, slots, targets, outc)
         self.res.teacher_calls += len(slots)
-        confirmed = (msg.intent == CONFIRM) | (msg.intent2 == CONFIRM) | (msg.revealed == targets)
-        return np.where(msg.eval >= 0, msg.eval / m, confirmed.sum(1) / m)
+        if self.parser == "pessimistic":
+            confirmed = (msg.intent == CONFIRM) | (msg.intent2 == CONFIRM) | (msg.revealed == targets)
+            r = confirmed.sum(1) / m
+        else:
+            fail_only = np.isin(msg.intent, FAILURE_ONLY) | np.isin(msg.intent2, FAILURE_ONLY)
+            failed = fail_only | ((msg.revealed >= 0) & (msg.revealed != targets))
+            r = 1 - np.minimum(m, failed.sum(1) + (msg.vague_group >= 0)) / m
+        return np.where(msg.eval >= 0, msg.eval / m, r)
 
 
 def run(arm, env: HEnv, prof: Profile, seed=0, budget=65536, eval_every=2048, overrides=None):
     world = HWorld(env, np.random.default_rng(seed))
     P0 = conditionals(env.flat().base_table(), env.b, env.k)
-    o = overrides or {}
-    if arm == "glft":
-        learner = GLFT(world, P0, prof, GLFTConfig(**o))
+    o = dict(overrides or {})
+    if arm in ("glft", "glft-dist"):
+        learner = GLFT(world, P0, prof, GLFTConfig(**({"distill": "dist"} if arm == "glft-dist" else {}), **o))
     else:
         algo, reward = arm.split("-")
         assert reward == "parse"
-        learner = ParsePG(world, P0, prof, RLConfig(algo=algo, reward=reward, **o))
+        parser = o.pop("parser", "pessimistic")
+        learner = ParsePG(world, P0, prof, RLConfig(algo=algo, reward=reward, **o), parser=parser)
     curve = []
     nxt = 0
     while True:

@@ -85,3 +85,21 @@ def test_intent_teacher_semantics_and_ideal_calibration():
     assert not np.isin(star.intent, [CORRECT, HINT]).any()
     assert ((star.eval == -1) | (star.eval == 4)).all() and (star.vague_group == -1).all()
     assert ((star.intent == CONFIRM) | (star.intent == NONE) | (star.revealed == targets)).all()
+
+
+def test_path_table_and_optimistic_parser():
+    from glft.l1_horizon import HEnv, conditionals
+    from glft.l1_intents import PROFILES, ParsePG, path_table
+    from glft.l1_horizon import HWorld, RLConfig
+    h = HEnv(b=4, k=3, q=0.1)
+    base = h.flat().base_table()
+    np.testing.assert_allclose(path_table(conditionals(base, 4, 3)), base, atol=1e-12)
+    # Vague teacher: optimistic parser gives 1 exactly on successes, < 1 on failures.
+    w = HWorld(h, np.random.default_rng(0))
+    pg = ParsePG(w, conditionals(base, 4, 3), PROFILES["vague"], RLConfig(algo="grpo", reward="parse"),
+                 parser="optimistic")
+    slots, targets = w.requests(2000)
+    outc = np.where(w.rng.random(targets.shape) < 0.7, targets, (targets + 1) % h.N)
+    r = pg._reward(slots, targets, outc)
+    ok = (outc == targets).all(1)
+    assert (r[ok] == 1).all() and (r[~ok] < 1).all()

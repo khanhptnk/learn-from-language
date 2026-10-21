@@ -1,0 +1,144 @@
+
+(b, k)=(64, 1) H=4 q=0.02   final success @65k episodes | median episodes-to-90%
+  oracle references: rloo-frac: 0.83|-  grpo-frac: 0.67|-  fbc-verifier: 0.00|-  grpo-align: 1.00|25k
+     profile              glft         glft-dist     best RL-parse   (RL-parse arm chosen)
+    reporter       0.98 |  14k       0.99 |  10k       0.28 |    -     rloo-parse
+      grader       0.00 |    -       0.72 |    -       0.28 |    -     rloo-parse
+   explainer       0.98 |  14k       0.99 |  10k       0.28 |    -     rloo-parse
+       coach       0.00 |    -       0.72 |    -       0.28 |    -     rloo-parse
+      scorer       0.00 |    -       0.00 |    -       0.83 |    -     rloo-parse
+       vague       0.00 |    -       0.00 |    -       0.00 |    -     grpo-parse
+       mixed       0.97 |  23k       0.99 |  16k       0.44 |    -     grpo-parse-opt
+     desc0.0       0.00 |    -       0.72 |    -       0.28 |    -     rloo-parse
+     desc0.1       0.58 |    -       0.95 |  49k       0.28 |    -     rloo-parse
+    desc0.25       0.86 |    -       0.96 |  37k       0.28 |    -     rloo-parse
+     desc0.5       0.97 |  23k       0.99 |  14k       0.28 |    -     rloo-parse
+     desc1.0       0.98 |  14k       0.99 |  10k       0.28 |    -     rloo-parse
+
+(b, k)=(64, 1) H=4 q=0.1   final success @65k episodes | median episodes-to-90%
+  oracle references: rloo-frac: 0.99|16k  grpo-frac: 0.96|23k  fbc-verifier: 0.52|-  grpo-align: 1.00|6k
+     profile              glft         glft-dist     best RL-parse   (RL-parse arm chosen)
+    reporter       0.98 |  14k       1.00 |   8k       0.92 |  55k     grpo-parse-opt
+      grader       0.28 |    -       1.00 |  20k       0.92 |  55k     grpo-parse-opt
+   explainer       0.98 |  14k       1.00 |   8k       0.92 |  55k     grpo-parse-opt
+       coach       0.28 |    -       1.00 |  20k       0.92 |  55k     grpo-parse-opt
+      scorer       0.00 |    -       0.00 |    -       0.99 |  16k     rloo-parse
+       vague       0.01 |    -       0.11 |    -       0.00 |    -     grpo-parse-opt
+       mixed       0.98 |  20k       1.00 |   8k       0.97 |  31k     grpo-parse-opt
+     desc0.0       0.28 |    -       1.00 |  20k       0.92 |  55k     grpo-parse-opt
+     desc0.1       0.78 |    -       1.00 |  16k       0.92 |  55k     grpo-parse-opt
+    desc0.25       0.93 |  29k       1.00 |  14k       0.92 |  55k     grpo-parse-opt
+     desc0.5       0.99 |  20k       1.00 |  12k       0.92 |  55k     grpo-parse-opt
+     desc1.0       0.98 |  14k       1.00 |   8k       0.92 |  55k     grpo-parse-opt
+
+(b, k)=(64, 1) H=4 q=0.35   final success @65k episodes | median episodes-to-90%
+  oracle references: rloo-frac: 0.99|8k  grpo-frac: 1.00|6k  fbc-verifier: 1.00|4k  grpo-align: 1.00|4k
+     profile              glft         glft-dist     best RL-parse   (RL-parse arm chosen)
+    reporter       0.99 |  12k       1.00 |   6k       0.96 |  27k     rloo-parse-opt
+      grader       0.97 |  23k       1.00 |   8k       0.96 |  27k     rloo-parse-opt
+   explainer       0.99 |  12k       1.00 |   6k       0.96 |  27k     rloo-parse-opt
+       coach       0.97 |  23k       1.00 |   8k       0.96 |  27k     rloo-parse-opt
+      scorer       0.67 |    -       1.00 |  10k       1.00 |   6k     grpo-parse
+       vague       0.57 |    -       0.97 |  29k       1.00 |   8k     grpo-parse-opt
+       mixed       0.99 |  18k       1.00 |   6k       0.98 |  10k     grpo-parse-opt
+     desc0.0       0.97 |  23k       1.00 |   8k       0.96 |  27k     rloo-parse-opt
+     desc0.1       0.99 |  20k       1.00 |   8k       0.96 |  27k     rloo-parse-opt
+    desc0.25       0.93 |  16k       1.00 |   8k       0.96 |  27k     rloo-parse-opt
+     desc0.5       0.97 |  12k       1.00 |   6k       0.96 |  27k     rloo-parse-opt
+     desc1.0       0.99 |  12k       1.00 |   6k       0.96 |  27k     rloo-parse-opt
+
+(b, k)=(4, 3) H=12 q=0.02   final success @65k episodes | median episodes-to-90%
+  oracle references: rloo-frac: 0.59|-  grpo-frac: 0.34|-  fbc-verifier: 0.00|-  grpo-align: 1.00|25k
+     profile              glft         glft-dist     best RL-parse   (RL-parse arm chosen)
+    reporter       0.98 |  10k       1.00 |   8k       0.18 |    -     grpo-parse
+      grader       0.04 |    -       0.72 |    -       0.18 |    -     grpo-parse
+   explainer       0.98 |  10k       1.00 |   8k       0.18 |    -     grpo-parse
+       coach       0.04 |    -       0.72 |    -       0.18 |    -     grpo-parse
+      scorer       0.00 |    -       0.00 |    -       0.67 |    -     grpo-parse
+       vague       0.00 |    -       0.00 |    -       0.00 |    -     grpo-parse
+       mixed       0.97 |  16k       1.00 |  10k       0.14 |    -     grpo-parse
+     desc0.0       0.04 |    -       0.72 |    -       0.18 |    -     grpo-parse
+     desc0.1       0.79 |    -       0.95 |  47k       0.18 |    -     grpo-parse
+    desc0.25       0.96 |  29k       0.99 |  23k       0.18 |    -     grpo-parse
+     desc0.5       0.98 |  16k       0.98 |  23k       0.18 |    -     grpo-parse
+     desc1.0       0.98 |  10k       1.00 |   8k       0.18 |    -     grpo-parse
+
+(b, k)=(4, 3) H=12 q=0.1   final success @65k episodes | median episodes-to-90%
+  oracle references: rloo-frac: 0.92|51k  grpo-frac: 0.77|-  fbc-verifier: 0.19|-  grpo-align: 1.00|8k
+     profile              glft         glft-dist     best RL-parse   (RL-parse arm chosen)
+    reporter       0.99 |  10k       1.00 |   8k       0.74 |    -     rloo-parse
+      grader       0.53 |    -       1.00 |  20k       0.74 |    -     rloo-parse
+   explainer       0.99 |  10k       1.00 |   8k       0.74 |    -     rloo-parse
+       coach       0.53 |    -       1.00 |  20k       0.74 |    -     rloo-parse
+      scorer       0.00 |    -       0.00 |    -       0.93 |  49k     rloo-parse
+       vague       0.02 |    -       0.06 |    -       0.12 |    -     grpo-parse-opt
+       mixed       0.96 |  16k       1.00 |  10k       0.89 |    -     grpo-parse-opt
+     desc0.0       0.53 |    -       1.00 |  20k       0.74 |    -     rloo-parse
+     desc0.1       0.89 |    -       1.00 |  18k       0.74 |    -     rloo-parse
+    desc0.25       0.98 |  25k       1.00 |  14k       0.74 |    -     rloo-parse
+     desc0.5       0.97 |  16k       1.00 |  10k       0.74 |    -     rloo-parse
+     desc1.0       0.99 |  10k       1.00 |   8k       0.74 |    -     rloo-parse
+
+(b, k)=(4, 3) H=12 q=0.35   final success @65k episodes | median episodes-to-90%
+  oracle references: rloo-frac: 0.98|14k  grpo-frac: 0.97|14k  fbc-verifier: 1.00|4k  grpo-align: 1.00|4k
+     profile              glft         glft-dist     best RL-parse   (RL-parse arm chosen)
+    reporter       0.98 |   8k       1.00 |   6k       0.95 |  41k     grpo-parse-opt
+      grader       0.98 |  23k       1.00 |   8k       0.95 |  41k     grpo-parse-opt
+   explainer       0.98 |   8k       1.00 |   6k       0.95 |  41k     grpo-parse-opt
+       coach       0.98 |  23k       1.00 |   8k       0.95 |  41k     grpo-parse-opt
+      scorer       0.84 |    -       1.00 |  10k       0.98 |  12k     grpo-parse
+       vague       0.70 |    -       0.98 |  31k       1.00 |   8k     grpo-parse-opt
+       mixed       0.95 |  16k       1.00 |   6k       0.94 |  33k     rloo-parse-opt
+     desc0.0       0.98 |  23k       1.00 |   8k       0.95 |  41k     grpo-parse-opt
+     desc0.1       0.93 |  16k       1.00 |   8k       0.95 |  41k     grpo-parse-opt
+    desc0.25       0.96 |  14k       1.00 |   8k       0.95 |  41k     grpo-parse-opt
+     desc0.5       0.99 |  12k       1.00 |   8k       0.95 |  41k     grpo-parse-opt
+     desc1.0       0.98 |   8k       1.00 |   6k       0.95 |  41k     grpo-parse-opt
+
+(b, k)=(2, 6) H=24 q=0.02   final success @65k episodes | median episodes-to-90%
+  oracle references: rloo-frac: 0.51|-  grpo-frac: 0.27|-  fbc-verifier: 0.00|-  grpo-align: 1.00|25k
+     profile              glft         glft-dist     best RL-parse   (RL-parse arm chosen)
+    reporter       0.99 |  10k       0.99 |   8k       0.18 |    -     grpo-parse
+      grader       0.07 |    -       0.73 |    -       0.18 |    -     grpo-parse
+   explainer       0.99 |  10k       0.99 |   8k       0.18 |    -     grpo-parse
+       coach       0.07 |    -       0.73 |    -       0.18 |    -     grpo-parse
+      scorer       0.00 |    -       0.00 |    -       0.58 |    -     grpo-parse
+       vague       0.00 |    -       0.00 |    -       0.00 |    -     grpo-parse
+       mixed       0.99 |  16k       1.00 |  10k       0.19 |    -     rloo-parse
+     desc0.0       0.07 |    -       0.73 |    -       0.18 |    -     grpo-parse
+     desc0.1       0.83 |    -       0.96 |  47k       0.18 |    -     grpo-parse
+    desc0.25       0.87 |    -       0.99 |  20k       0.18 |    -     grpo-parse
+     desc0.5       0.98 |  16k       0.99 |  18k       0.18 |    -     grpo-parse
+     desc1.0       0.99 |  10k       0.99 |   8k       0.18 |    -     grpo-parse
+
+(b, k)=(2, 6) H=24 q=0.1   final success @65k episodes | median episodes-to-90%
+  oracle references: rloo-frac: 0.87|-  grpo-frac: 0.73|-  fbc-verifier: 0.17|-  grpo-align: 1.00|6k
+     profile              glft         glft-dist     best RL-parse   (RL-parse arm chosen)
+    reporter       0.99 |  10k       1.00 |   8k       0.69 |    -     rloo-parse
+      grader       0.65 |    -       1.00 |  20k       0.69 |    -     rloo-parse
+   explainer       0.99 |  10k       1.00 |   8k       0.69 |    -     rloo-parse
+       coach       0.65 |    -       1.00 |  20k       0.69 |    -     rloo-parse
+      scorer       0.00 |    -       0.00 |    -       0.94 |  45k     grpo-parse
+       vague       0.01 |    -       0.06 |    -       0.00 |    -     grpo-parse-opt
+       mixed       0.99 |  16k       1.00 |   8k       0.83 |    -     grpo-parse-opt
+     desc0.0       0.65 |    -       1.00 |  20k       0.69 |    -     rloo-parse
+     desc0.1       0.93 |  35k       1.00 |  16k       0.69 |    -     rloo-parse
+    desc0.25       0.99 |  25k       1.00 |  12k       0.69 |    -     rloo-parse
+     desc0.5       0.98 |  16k       1.00 |  10k       0.69 |    -     rloo-parse
+     desc1.0       0.99 |  10k       1.00 |   8k       0.69 |    -     rloo-parse
+
+(b, k)=(2, 6) H=24 q=0.35   final success @65k episodes | median episodes-to-90%
+  oracle references: rloo-frac: 0.97|20k  grpo-frac: 0.97|20k  fbc-verifier: 1.00|4k  grpo-align: 1.00|4k
+     profile              glft         glft-dist     best RL-parse   (RL-parse arm chosen)
+    reporter       0.98 |  10k       1.00 |   6k       0.93 |  53k     grpo-parse-opt
+      grader       0.99 |  23k       1.00 |   8k       0.93 |  53k     grpo-parse-opt
+   explainer       0.98 |  10k       1.00 |   6k       0.93 |  53k     grpo-parse-opt
+       coach       0.99 |  23k       1.00 |   8k       0.93 |  53k     grpo-parse-opt
+      scorer       0.88 |    -       1.00 |  10k       0.97 |  20k     rloo-parse
+       vague       0.73 |    -       0.99 |  29k       0.99 |   8k     grpo-parse-opt
+       mixed       0.96 |  16k       1.00 |   6k       0.95 |  35k     grpo-parse-opt
+     desc0.0       0.99 |  23k       1.00 |   8k       0.93 |  53k     grpo-parse-opt
+     desc0.1       0.96 |  16k       1.00 |   8k       0.93 |  53k     grpo-parse-opt
+    desc0.25       0.98 |  14k       1.00 |   8k       0.93 |  53k     grpo-parse-opt
+     desc0.5       0.99 |  14k       1.00 |   8k       0.93 |  53k     grpo-parse-opt
+     desc1.0       0.98 |  10k       1.00 |   6k       0.93 |  53k     grpo-parse-opt
