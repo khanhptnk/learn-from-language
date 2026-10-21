@@ -12,10 +12,11 @@ Summaries of finished runs. Raw per-run JSON lives in the gitignored `outputs/`.
 | `l1/intents_rerun_scorer_vague.log` | GFT re-tuned for scorer/vague after the EVAL = m fix (supersedes those rows above) | `uv run python experiments/l1/intents_l1.py rerun` |
 | `l1/intents_extend.log` | Batch GFT with distribution distillation (`gft-dist`, proposed) and RL with the optimistic parser | `uv run python experiments/l1/intents_l1.py extend` |
 | `l1/verify_intents_exact.log` | Exact-population convergence for every intent profile, chatter-only, liars, style preferences | `uv run python experiments/l1/verify_intents_exact.py` |
-| `l1/sgd_regime.txt`, `l1/sgd_horizon.txt`, `l1/sgd_intents.txt`, `l1/sgd_intents_compact.txt` | **Incremental GFT (`gft-sgd`: Batch GFT with a few SGD steps per fit, Algorithm 2 of the revised paper; batch size 1 gives Online GFT, Algorithm 3)** | `uv run python experiments/l1/online_l1.py {regime,horizon,intents}` |
-| `theory/gft_verification.md` | **Numerical verification of every result in `GFT_revised_2026-10-20.pdf`** (exact population, FCP/SDPO, gradient identities, finite-sample theorems) | `uv run python experiments/theory/verify_gft.py` |
+| `l1/sgd_regime.txt`, `l1/sgd_horizon.txt`, `l1/sgd_intents.txt`, `l1/sgd_intents_compact.txt` | Incremental GFT (`gft-sgd`: Batch GFT with a few SGD steps per fit, Algorithm 2 of the revised paper; batch size 1 gives Online GFT, Algorithm 3). **Run before the fix to the auxiliary model's "not mentioned" term (`unm_lr_frac`) and expected-gradient distillation, so these numbers understate the current `gft-sgd`; the rerun with the fixed version was stopped and has not been redone.** | `uv run python experiments/l1/online_l1.py {regime,horizon,intents}` |
+| `theory/gft_verification.md` | Numerical verification of `GFT_revised_2026-10-20.pdf`: exact-population results, FCP/SDPO, gradient identities and rejection sampling are checked as stated. The finite-sample theorems (8.1, 8.2, D.1) are checked qualitatively with practical batch and step schedules, far below their sufficient conditions. Not checked: the finite-time gradient bound (Eq. 89) and Thm 8.2's conditions B1–B4 themselves. | `uv run python experiments/theory/verify_gft.py` |
 
-All L1 runs are tabular. The method under test is incremental GFT (`gft-sgd`, `gft/l1_online.py`).
+All L1 runs are tabular. The method under test is incremental GFT (`gft-sgd`, `gft/l1_online.py`); no committed
+sweep uses its current configuration yet (see the `sgd_*` row).
 Earlier L1 GFT results (`gft`, `gft-dist` in `gft/l1_tabular.py`, `gft/l1_horizon.py`, `gft/l1_intents.py`)
 use count-based full refits with replay (Algorithm 1 style) and are kept as references.
 
