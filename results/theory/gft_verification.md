@@ -90,3 +90,14 @@ Informative full-support channel; G* from an interior mixture, so J has an inter
 
 §D.3 restricted actor p(success) = σ(θ²): at θ = 0, dJ/dθ = 0.0 with success 0.50 — a stationary point that is not optimal, so stationarity alone does not imply task success. **PASS**
 
+## 5. Proof internals and assumptions
+
+| Check | Status | Evidence |
+|---|---|---|
+| Thm 8.1 proof steps (56), (57), (59)–(62), batches fixed 200 | PASS | 349 sampled rounds; smallest slack per inequality: eq56 4.2e-02, step1 0.0e+00, eq57a 0.0e+00, eq57b 0.0e+00, eq59 4.2e-03, eq60 0.0e+00, eq61 0.0e+00, eq62a 0.0e+00, eq62b 0.0e+00 |
+| Thm 8.1 proof steps (56), (57), (59)–(62), batches 500 (t+1)^2 | PASS | 500 sampled rounds; smallest slack per inequality: eq56 4.2e-02, step1 2.5e-06, eq57a 0.0e+00, eq57b 1.5e-05, eq59 3.9e-02, eq60 1.5e-05, eq61 1.5e-05, eq62a 1.6e-05, eq62b 1.5e-05 |
+| Eq. 89 finite-time approximate-gradient bound | PASS | α=0.5, aux mix λ=0.0: 0.0312 ≤ 0.3141; α=0.5, aux mix λ=0.3: 0.0370 ≤ 0.5449; α=0.1, aux mix λ=0.1: 0.0252 ≤ 0.1184 (L = 0.292 from Hessians over visited iterates, B = √2; the bound is ~5–15× loose) |
+| Thm 8.2 hypotheses and Eq. 70 on the paper's example, batches fixed 20 | PASS | B3: μ = 0.00247 > 0; B2: κ = 8.83; L_x = 6.00; η_t 75.2 → 54.8; Eq. 70 holds every round but only vacuously here — η_t is far from summable at these batch sizes (the theorem needs N_t ≍ (t+1)^8, M_t ≍ (t+1)^4) |
+| Thm 8.2 hypotheses and Eq. 70 on the paper's example, batches 200 (t+1)^2 | PASS | B3: μ = 0.00247 > 0; B2: κ = 8.83; L_x = 6.00; η_t 27.8 → 6.3; Eq. 70 holds every round but only vacuously here — η_t is far from summable at these batch sizes (the theorem needs N_t ≍ (t+1)^8, M_t ≍ (t+1)^4) |
+| Thm D.1 with A2 satisfied (projected probability-vector auxiliary on a floored simplex) | PASS | strong convexity μ ≥ min P(x,f) = 0.0042; tracking 0.336 → 0.0228, ‖∇J‖ 0.233 → 0.0238 over 200k single-sample steps |
+

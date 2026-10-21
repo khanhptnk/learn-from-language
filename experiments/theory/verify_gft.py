@@ -16,7 +16,8 @@ from gft.envs.bandit import (mixture_aliasing, random_audit_instance, random_cha
                               section7_nonmonotone)
 from gft.l1_intents import Profile, desc_share_profile  # noqa: E402
 from gft.metrics import kl, tv  # noqa: E402
-from gft.theory import (approximate_posterior_bias, batch_gft_tabular, conditioning_variance_identity,  # noqa: E402
+from gft.theory import (eq89_check, online_gft_simplex, thm81_proof_checks, thm82_conditions,  # noqa: E402
+                        approximate_posterior_bias, batch_gft_tabular, conditioning_variance_identity,  # noqa: E402
                          d3_counterexample, damped_run, fcp_fixed_message_closed_form, fcp_population,
                          finite_difference, gft_operator, gradient_forms, J_value, linear_softmax_batch_gft,
                          online_gft, posterior, rejection_sample, sdpo_reverse_kl_minimizer, sdpo_two_action_step,
@@ -259,6 +260,48 @@ def finite_sample():
         "point that is not optimal, so stationarity alone does not imply task success. **PASS**\n")
 
 
+def internals():
+    say("## 5. Proof internals and assumptions\n")
+    say("| Check | Status | Evidence |\n|---|---|---|")
+    ins = random_audit_instance(np.random.default_rng(5), m=2, n_opt=2, n_bad=5, kappa=1.0, opt_mass=0.05)
+    for label, sched in [("fixed 200", lambda t: 200), ("500 (t+1)^2", lambda t: 500 * (t + 1) ** 2)]:
+        worst, rounds = {}, 0
+        for s in range(20):
+            for row in thm81_proof_checks(np.random.default_rng(s), ins.p0, ins.F, ins.g_star, ins.pbar, 25, sched, sched):
+                rounds += 1
+                for k, v in row.items():
+                    worst[k] = min(worst.get(k, np.inf), v)
+        check(f"Thm 8.1 proof steps (56), (57), (59)–(62), batches {label}", min(worst.values()) >= -1e-12,
+              f"{rounds} sampled rounds; smallest slack per inequality: "
+              + ", ".join(f"{k} {v:.1e}" for k, v in worst.items()))
+    F = 0.8 * np.eye(4) + 0.05
+    g = np.array([0.5, 0.3, 0.15, 0.05]) @ F
+    th0 = np.log([0.05, 0.15, 0.3, 0.5])
+    parts = []
+    ok = True
+    for alpha, lam in [(0.5, 0.0), (0.5, 0.3), (0.1, 0.1)]:
+        lhs, rhs, L, B = eq89_check(F, g, th0, alpha, 400, lam, seeds=10, hess_points=60)
+        ok &= lhs <= rhs
+        parts.append(f"α={alpha}, aux mix λ={lam}: {lhs:.4f} ≤ {rhs:.4f}")
+    check("Eq. 89 finite-time approximate-gradient bound", ok,
+          "; ".join(parts) + f" (L = {L:.3f} from Hessians over visited iterates, B = √2; the bound is ~5–15× loose)")
+    for label, sched in [("fixed 20", lambda t: 20), ("200 (t+1)^2", lambda t: 200 * (t + 1) ** 2)]:
+        out = thm82_conditions(np.random.default_rng(0), -2.0, 15, sched, sched)
+        r = out["rows"]
+        check(f"Thm 8.2 hypotheses and Eq. 70 on the paper's example, batches {label}",
+              out["mu"] > 0 and np.isfinite(out["kappa"]) and min(x["eq70"] for x in r) >= 0,
+              f"B3: μ = {out['mu']:.5f} > 0; B2: κ = {out['kappa']:.2f}; L_x = {out['L_x']:.2f}; η_t "
+              f"{r[0]['eta']:.1f} → {r[-1]['eta']:.1f}; Eq. 70 holds every round but only vacuously here — η_t is far "
+              "from summable at these batch sizes (the theorem needs N_t ≍ (t+1)^8, M_t ≍ (t+1)^4)")
+    _, _, log, pmin = online_gft_simplex(np.random.default_rng(2), F, g, np.array([True, False, False, False]),
+                                         200_000, theta0=th0, log_every=20_000)
+    check("Thm D.1 with A2 satisfied (projected probability-vector auxiliary on a floored simplex)",
+          pmin > 0 and log[-1, 1] < 0.2 * log[0, 1] and log[-1, 2] < 0.25 * log[0, 2],
+          f"strong convexity μ ≥ min P(x,f) = {pmin:.4f}; tracking {log[0, 1]:.3f} → {log[-1, 1]:.4f}, "
+          f"‖∇J‖ {log[0, 2]:.3f} → {log[-1, 2]:.4f} over 200k single-sample steps")
+    say("")
+
+
 def main():
     say("# Numerical verification of GFT_revised_2026-10-20.pdf\n")
     say("All checks use small enumerated instances; section and equation numbers refer to the revised paper. "
@@ -267,6 +310,7 @@ def main():
     comparisons()
     gradients()
     finite_sample()
+    internals()
     OUT.parent.mkdir(parents=True, exist_ok=True)
     OUT.write_text("\n".join(lines) + "\n")
 

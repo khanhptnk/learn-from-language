@@ -317,3 +317,206 @@ def d3_counterexample(theta=0.0):
     """p(success) = sigmoid(theta^2), deterministic binary feedback, G* = "success": J = log sigmoid(theta^2).
     Returns (dJ/dtheta, success probability) at theta."""
     return float(2 * theta * (1 - sigmoid(theta ** 2))), float(sigmoid(theta ** 2))
+
+
+# ================================================================ proof internals and assumptions
+
+def _joint_and_rhat(rng, p, F, n):
+    """N fresh (x, f) pairs from p(x) F(f|x): empirical joint P_hat and conditional r_hat (fallback p)."""
+    n_x, n_f = F.shape
+    x = rng.choice(n_x, size=n, p=p)
+    u = rng.random(n)
+    f = (F[x].cumsum(1) < u[:, None]).sum(1).clip(max=n_f - 1)
+    joint = np.zeros((n_x, n_f))
+    np.add.at(joint, (x, f), 1)
+    P_hat = joint / n
+    col = joint.sum(0)
+    r_hat = np.where(col > 0, joint / np.where(col > 0, col, 1), p[:, None])
+    return P_hat, r_hat
+
+
+def thm81_proof_checks(rng, p0, F, g, pbar, T, N, M):
+    """Run finite-tabular Batch GFT and evaluate the deterministic inequalities of the Thm 8.1 proof
+    (Appendix A) on the realized quantities each round. Returns per-round slacks (>= 0 means it holds)."""
+    S = pbar > 0
+    rows = []
+    p = np.asarray(p0, float)
+    for t in range(T):
+        P = p[:, None] * F
+        m = P.sum(0)
+        P_hat, r_hat = _joint_and_rhat(rng, p, F, N(t))
+        tvP = tv(P.ravel(), P_hat.ravel())
+        on = g > 0
+        r = np.where(m > 0, P / np.where(m > 0, m, 1), 0.0)
+        cond_tv = np.array([tv(r[:, k], r_hat[:, k]) for k in range(F.shape[1])])
+        q = r[:, on] @ g[on]                                   # exact operator T(p_t)
+        q_hat = r_hat[:, on] @ g[on]
+        b_t = p[S].min()
+        row = {
+            # (56): m_t(f) >= b G*(f) when p_t >= b on S
+            "eq56": float((m[on] - b_t * g[on]).min()),
+            # first display of step 1: sum_f m(f) TV(r, r_hat) <= 2 TV(P, P_hat)
+            "step1": float(2 * tvP - (m * cond_tv).sum()),
+            # (57): TV(q, q_hat) <= sum_f G*(f) TV(r, r_hat) <= (2/b) TV(P, P_hat)
+            "eq57a": float((g[on] * cond_tv[on]).sum() - tv(q, q_hat)),
+            "eq57b": float((2 / b_t) * tvP - (g[on] * cond_tv[on]).sum()),
+            # (59): q_t(x) >= p_t(x) pbar(x) sum_f F(f|x)^2 on S
+            "eq59": float((q[S] - p[S] * pbar[S] * (F[S] ** 2).sum(1)).min()),
+        }
+        xs = rng.choice(len(p), size=M(t), p=q_hat / q_hat.sum())
+        p_next = np.bincount(xs, minlength=len(p)) / M(t)
+        beta = min(p_next[S].min(), q[S].min())
+        if beta > 0:
+            e = tv(p_next, q)
+            V = lambda z: kl(pbar, z)
+            Phi = lambda z: kl(g, feedback_marginal(z, F))
+            row.update({
+                "eq60": float((2 / beta) * e - abs(V(p_next) - V(q))),
+                "eq61": float((2 / beta) * e - abs(Phi(p_next) - Phi(q))),
+                "eq62a": float(V(p) - V(p_next) - (Phi(p) - 2 * e / beta)),
+                "eq62b": float(Phi(p) + 2 * e / beta - Phi(p_next)),
+            })
+        rows.append(row)
+        p = p_next
+        if p[S].min() == 0:                                    # witness support lost: proof's event fails
+            break
+    return rows
+
+
+def eq89_check(F, g, theta0, alpha, T, lam, seeds=20, hess_points=200):
+    """Eq. 89 for the actor-only update theta += alpha s_theta(X+), X+ ~ r_phi(.|f*), f* ~ G*, where
+    r_phi = (1 - lam) r_theta + lam * uniform has average TV error delta_t. Returns (lhs, rhs, L, B):
+    lhs = mean over t and seeds of |grad J(theta_t)|^2, rhs = the bound with L estimated as the largest
+    Hessian spectral norm of J over visited iterates and random points nearby."""
+    n_x = F.shape[0]
+    on = np.nonzero(g > 0)[0]
+    B = np.sqrt(2.0)                                          # |e_x - p| <= sqrt(2) for a softmax score
+    gsq, deltas, visited = [], [], []
+    for s in range(seeds):
+        rng = np.random.default_rng(s)
+        theta = np.array(theta0, float)
+        for t in range(T):
+            p = softmax(theta)
+            visited.append(theta.copy())
+            gsq.append(np.linalg.norm(gradient_forms(theta, F, g)[0]) ** 2)
+            f = rng.choice(len(g), p=g)
+            r_phi = (1 - lam) * posterior(p, F, f) + lam / n_x
+            deltas.append(sum(g[k] * lam * tv(posterior(p, F, k), np.full(n_x, 1 / n_x)) for k in on))
+            x = rng.choice(n_x, p=r_phi)
+            s_ = -p
+            s_[x] += 1
+            theta = theta + alpha * s_
+    rng = np.random.default_rng(123)
+    pts = [visited[i] for i in rng.integers(len(visited), size=hess_points)]
+    pts += [v + rng.normal(scale=alpha * B, size=n_x) for v in pts]
+    L = max(np.linalg.norm(_hessian(lambda th: J_value(th, F, g), th), 2) for th in pts)
+    lhs = float(np.mean(gsq))
+    J0 = -J_value(np.array(theta0, float), F, g)
+    rhs = float(2 * J0 / (alpha * T) + 4 * B ** 2 * np.mean(np.square(deltas)) + L * alpha * B ** 2)
+    return lhs, rhs, float(L), float(B)
+
+
+def _hessian(fun, x, eps=1e-4):
+    n = len(x)
+    H = np.zeros((n, n))
+    for i in range(n):
+        for j in range(n):
+            di, dj = np.eye(n)[i] * eps, np.eye(n)[j] * eps
+            H[i, j] = (fun(x + di + dj) - fun(x + di - dj) - fun(x - di + dj) + fun(x - di - dj)) / (4 * eps * eps)
+    return H
+
+
+def thm82_conditions(rng, theta0, T, N, M, bound=6.0, grid=241):
+    """Section 8.2 example: check B2-B3 and the proof's inequality (70) on the realized Batch GFT iterates.
+
+    Returns dict with mu (min curvature of Q_theta over Theta), kappa (sup G*(f)/m_theta(f)), L_x, and per
+    round: u_t, z_t (uniform empirical deviations on grids over K and Theta), a_t, b_t (optimization
+    excesses of the smoothed/clipped fits), eta_t (Eq. 40) and the slack of Eq. 70."""
+    vs = np.linspace(-bound, bound, grid)
+    u = sigmoid(vs)
+    mu = float((u * (1 - u)).min())                           # -Q''(v) = sigma(v)(1 - sigma(v))
+    m_plus = 0.1 + 0.8 * u
+    kappa = float(np.maximum(0.9 / m_plus, 0.1 / (1 - m_plus)).max())
+    L_x = float(-np.log(sigmoid(-bound)))
+    J = lambda th: -(0.9 * np.log(0.9 / (0.1 + 0.8 * sigmoid(th))) + 0.1 * np.log(0.1 / (0.9 - 0.8 * sigmoid(th))))
+    phi_grid = [(a, b) for a in np.linspace(-bound, bound, 49) for b in np.linspace(-bound, bound, 49)]
+    rows, th = [], theta0
+    for t in range(T):
+        p1 = sigmoid(th)
+        x = rng.random(N(t)) < p1
+        plus = rng.random(N(t)) < np.where(x, 0.9, 0.1)
+        sign = np.where(plus, 1, -1)
+
+        def nll_hat(a, b):
+            z = a + b * sign
+            return float(-np.mean(np.where(x, np.log(sigmoid(z)), np.log(sigmoid(-z)))))
+
+        def nll_pop(a, b):                                    # exact population conditional NLL
+            tot = 0.0
+            for xv, px in ((1, p1), (0, 1 - p1)):
+                for sv, pf in ((1, 0.9 if xv else 0.1), (-1, 0.1 if xv else 0.9)):
+                    z = a + b * sv
+                    tot -= px * pf * (np.log(sigmoid(z)) if xv else np.log(sigmoid(-z)))
+            return tot
+
+        u_t = max(abs(nll_hat(a, b) - nll_pop(a, b)) for a, b in phi_grid)
+        logits = []
+        for s in (True, False):
+            k = plus == s
+            logits.append(logit((x[k].sum() + 0.5) / (k.sum() + 1.0)))
+        phi = np.clip([(logits[0] + logits[1]) / 2, (logits[0] - logits[1]) / 2], -bound, bound)
+        a_t = nll_hat(*phi) - min(nll_hat(a, b) for a, b in phi_grid + [tuple(phi)])
+        fstar = rng.random(M(t)) < 0.9
+        xp = rng.random(M(t)) < sigmoid(phi[0] + phi[1] * np.where(fstar, 1, -1))
+        freq = xp.mean()
+        Q_hat = lambda v: freq * np.log(sigmoid(v)) + (1 - freq) * np.log(sigmoid(-v))
+        r_tilde = 0.9 * sigmoid(phi[0] + phi[1]) + 0.1 * sigmoid(phi[0] - phi[1])
+        Q_tilde = lambda v: r_tilde * np.log(sigmoid(v)) + (1 - r_tilde) * np.log(sigmoid(-v))
+        z_t = float(max(abs(Q_hat(v) - Q_tilde(v)) for v in vs))
+        th_next = float(np.clip(logit((xp.sum() + 0.5) / (M(t) + 1.0)), -bound, bound))
+        b_t = float(max(Q_hat(v) for v in vs) - Q_hat(th_next))
+        eta = 4 * L_x * np.sqrt(kappa * (2 * u_t + max(a_t, 0)) / 2) + 2 * z_t + max(b_t, 0)
+        slack70 = J(th_next) - J(th) - (mu / 4 * (th_next - th) ** 2 - 2 * eta)
+        rows.append(dict(u=u_t, z=z_t, a=a_t, b=b_t, eta=float(eta), eq70=float(slack70), theta=th_next))
+        th = th_next
+    return dict(mu=mu, kappa=kappa, L_x=L_x, rows=rows)
+
+
+def project_floored_simplex(v, eps):
+    """Euclidean projection onto {r : r >= eps, sum r = 1} (a compact convex set K)."""
+    n = len(v)
+    w = v - eps
+    total = 1 - n * eps
+    srt = np.sort(w)[::-1]
+    css = np.cumsum(srt) - total
+    k = np.nonzero(srt - css / (np.arange(n) + 1) > 0)[0][-1]
+    return np.maximum(w - css[k] / (k + 1), 0) + eps
+
+
+def online_gft_simplex(rng, F, g, optimal, T, beta0=0.5, alpha0=3.0, eps=0.01, theta0=None, log_every=1000):
+    """Algorithm 3 as analyzed in Thm D.1 / Section D.3: the auxiliary parameters are probability vectors
+    phi[f] in a floored simplex K (projected SGD), so the population conditional NLL is strongly convex on K.
+    Returns (theta, phi, log rows (t, tracking E TV, |grad J|)) and the strong-convexity constant
+    mu = min_{x,f} P(x, f) / max_{K} phi^2 >= min P(x, f) at the final actor."""
+    n_x, n_f = F.shape
+    theta = np.zeros(n_x) if theta0 is None else np.array(theta0, float)
+    phi = np.full((n_f, n_x), 1.0 / n_x)
+    log = []
+    for t in range(T):
+        beta, alpha = beta0 * (t + 1) ** -0.6, alpha0 * (t + 1) ** -0.9
+        p = softmax(theta)
+        x = rng.choice(n_x, p=p)
+        f = rng.choice(n_f, p=F[x])
+        grad = np.zeros(n_x)
+        grad[x] = 1.0 / phi[f, x]                              # d log phi_f(x) / d phi_f
+        phi[f] = project_floored_simplex(phi[f] + beta * grad, eps)
+        fs = rng.choice(n_f, p=g)
+        xp = rng.choice(n_x, p=phi[fs])
+        s = -p
+        s[xp] += 1.0
+        theta = theta + alpha * s
+        if t % log_every == 0 or t == T - 1:
+            track = sum(g[k] * tv(phi[k], posterior(p, F, k)) for k in np.nonzero(g > 0)[0])
+            log.append((t, track, np.linalg.norm(gradient_forms(theta, F, g)[0])))
+    P = softmax(theta)[:, None] * F
+    return theta, phi, np.array(log), float(P.min())

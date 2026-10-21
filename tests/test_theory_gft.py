@@ -245,3 +245,55 @@ def test_thmD1_online_gft_tracks_posterior_and_gradient_vanishes():
 def test_sectionD3_restricted_actor_stationary_point_is_not_optimal():
     dJ, success = d3_counterexample(0.0)
     assert dJ == 0.0 and success == pytest.approx(0.5)
+
+
+# ------------------------------------------------------------------ proof internals and assumptions
+
+from gft.theory import eq89_check, online_gft_simplex, project_floored_simplex, thm81_proof_checks, thm82_conditions  # noqa: E402
+
+
+@pytest.mark.parametrize("sched", [lambda t: 200, lambda t: 300 * (t + 1) ** 2])
+def test_thm81_proof_inequalities_hold_on_sampled_runs(sched):
+    """Eqs. 56, 57, 59-62 of Appendix A, evaluated with realized quantities on actual Batch GFT runs."""
+    inst = random_audit_instance(np.random.default_rng(5), m=2, n_opt=2, n_bad=5, kappa=1.0, opt_mass=0.05)
+    for s in range(5):
+        for row in thm81_proof_checks(np.random.default_rng(s), inst.p0, inst.F, inst.g_star, inst.pbar, 15, sched, sched):
+            assert min(row.values()) >= -1e-12, row
+
+
+def test_eq89_finite_time_gradient_bound():
+    F = 0.8 * np.eye(4) + 0.05
+    g = np.array([0.5, 0.3, 0.15, 0.05]) @ F
+    for alpha, lam in [(0.5, 0.0), (0.2, 0.3)]:
+        lhs, rhs, L, B = eq89_check(F, g, np.log([0.05, 0.15, 0.3, 0.5]), alpha, 200, lam, seeds=5, hess_points=30)
+        assert lhs <= rhs
+
+
+def test_thm82_assumptions_and_key_inequality_on_example():
+    grow = lambda t: 200 * (t + 1) ** 2
+    out = thm82_conditions(np.random.default_rng(0), -2.0, 10, grow, grow)
+    assert out["mu"] > 0 and out["kappa"] < 10                 # B3 curvature, B2 coverage constant
+    rows = out["rows"]
+    assert min(r["eq70"] for r in rows) >= 0                  # Eq. 70 on the realized iterates
+    assert rows[-1]["eta"] < rows[0]["eta"]                   # error term shrinks with growing batches
+
+
+def test_project_floored_simplex():
+    rng = np.random.default_rng(0)
+    for _ in range(100):
+        v, eps = rng.normal(size=6) * 3, 0.02
+        p = project_floored_simplex(v, eps)
+        assert p.sum() == pytest.approx(1) and p.min() >= eps - 1e-12
+        # projection optimality: no feasible point is closer (check against random feasible points)
+        for _ in range(20):
+            w = project_floored_simplex(rng.normal(size=6), eps)
+            assert np.linalg.norm(v - p) <= np.linalg.norm(v - w) + 1e-9
+
+
+def test_thmD1_with_strongly_convex_simplex_auxiliary():
+    F = 0.8 * np.eye(4) + 0.05
+    g = np.array([0.5, 0.3, 0.15, 0.05]) @ F
+    _, _, log, pmin = online_gft_simplex(np.random.default_rng(2), F, g, np.array([True, False, False, False]),
+                                         60_000, theta0=np.log([0.05, 0.15, 0.3, 0.5]), log_every=10_000)
+    assert pmin > 0                                            # A2: Hessian diag P(x,f)/phi^2 >= min P > 0 on K
+    assert log[-1, 1] < 0.2 * log[0, 1] and log[-1, 2] < 0.25 * log[0, 2]
