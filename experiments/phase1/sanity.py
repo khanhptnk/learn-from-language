@@ -4,7 +4,7 @@ capacity  (a) BC on correct demos: can pi reach ~100%?
           (b) Stage-I realizability: pi^fb fit on base rollouts, conditioned on G*:
               accuracy on reported slots (should be ~1) and unreported slots (should match the
               exact posterior, = the prior when kappa_sat = kappa_viol).
-exact     Finite-sample GLFT per-requirement accuracy per round vs the exact recursion,
+exact     Finite-sample GFT per-requirement accuracy per round vs the exact recursion,
           for several data/step budgets.
 
   uv run python experiments/phase1/sanity.py capacity --n-values 16
@@ -20,11 +20,11 @@ import torch
 sys.path.insert(0, str(Path(__file__).parent))
 from run import base_policy, type_cast  # noqa: E402
 
-from glft.algos.common import evaluate, execute, rollout, train_bc  # noqa: E402
-from glft.algos.glft_exact import exact_slot_recursion  # noqa: E402
-from glft.algos.glft_neural import GLFT, GLFTConfig  # noqa: E402
-from glft.envs.reqworld import ReqWorldConfig, arg_for, sample_requests  # noqa: E402
-from glft.feedback.logical_form import TeacherConfig, audit, ideal  # noqa: E402
+from gft.algos.common import evaluate, execute, rollout, train_bc  # noqa: E402
+from gft.algos.gft_exact import exact_slot_recursion  # noqa: E402
+from gft.algos.gft_neural import GFT, GFTConfig  # noqa: E402
+from gft.envs.reqworld import ReqWorldConfig, arg_for, sample_requests  # noqa: E402
+from gft.feedback.logical_form import TeacherConfig, audit, ideal  # noqa: E402
 
 
 def capacity(w, t, base, g, lr=1e-3):
@@ -56,7 +56,7 @@ def exact(w, t, base, g, overrides, rounds):
     pol = base()
     a0 = evaluate(pol, w, 4000, g)["frac_sample"]
     ref = exact_slot_recursion(a0, t.kappa_sat, t.kappa_viol, rounds)
-    learner = GLFT(pol, w, t, GLFTConfig(**overrides), g)
+    learner = GFT(pol, w, t, GFTConfig(**overrides), g)
     print(f"round  exact_a  stage2_frac  pi_frac  pi_success  (exact success = a^m)   overrides={overrides}")
     for r in range(1, rounds + 1):
         info = learner.round()

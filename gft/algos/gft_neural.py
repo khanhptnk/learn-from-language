@@ -1,4 +1,4 @@
-"""GLFT with a neural policy (paper Section 3), finite-sample.
+"""GFT with a neural policy (paper Section 3), finite-sample.
 
 Each round:
   Stage I   run pi on fresh requests, get teacher feedback F, fit pi^fb(X | D, F) by BC
@@ -12,13 +12,13 @@ from dataclasses import dataclass
 
 import torch
 
-from glft.algos.common import Episodes, Resources, rollout, train_bc
-from glft.envs.reqworld import sample_requests
-from glft.feedback.logical_form import Message, TeacherConfig, audit, ideal
+from gft.algos.common import Episodes, Resources, rollout, train_bc
+from gft.envs.reqworld import sample_requests
+from gft.feedback.logical_form import Message, TeacherConfig, audit, ideal
 
 
 @dataclass
-class GLFTConfig:
+class GFTConfig:
     episodes_per_round: int = 256      # Stage I on-policy episodes (each gets one teacher call)
     stage2_per_round: int = 256        # Stage II rollouts of pi^fb (each uses one G* sample)
     stage1_steps: int = 50
@@ -30,8 +30,8 @@ class GLFTConfig:
     shared: bool = True
 
 
-class GLFT:
-    def __init__(self, policy, wcfg, tcfg: TeacherConfig, cfg: GLFTConfig, gen):
+class GFT:
+    def __init__(self, policy, wcfg, tcfg: TeacherConfig, cfg: GFTConfig, gen):
         self.pi = policy
         self.pi_fb = policy if cfg.shared else copy.deepcopy(policy)
         self.wcfg, self.tcfg, self.cfg, self.gen = wcfg, tcfg, cfg, gen

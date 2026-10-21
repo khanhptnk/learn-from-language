@@ -7,7 +7,7 @@ autoregressive per-step tables P[i][k, w, prefix, d] = pi(d_i | slot, target, d_
 policy has the same path distribution as L1 with N = b^k, so changing (b, k) at fixed N changes
 only the sequential structure.
 
-Learners mirror `l1_tabular`: GLFT counts paths (grounding pooled over targets for reported
+Learners mirror `l1_tabular`: GFT counts paths (grounding pooled over targets for reported
 requirements; per-target current-round counts for unreported) and converts them to per-step
 conditionals; RL uses per-step softmax logits with the terminal (or per-requirement) advantage
 on every step of the chain; filtered BC counts accepted paths. Path index: digits most
@@ -21,7 +21,7 @@ from dataclasses import dataclass, replace
 
 import numpy as np
 
-from glft.l1_tabular import Env, Resources, World, smooth
+from gft.l1_tabular import Env, Resources, World, smooth
 
 
 @dataclass(frozen=True)
@@ -109,7 +109,7 @@ def smooth_steps(path_counts, P, beta, b, k):
 
 
 @dataclass
-class GLFTConfig:
+class GFTConfig:
     episodes_per_round: int = 256
     stage2_per_round: int = 256
     factored: bool = True
@@ -118,8 +118,8 @@ class GLFTConfig:
     beta_distill: float = 4.0
 
 
-class GLFT:
-    def __init__(self, world: HWorld, P0, cfg: GLFTConfig):
+class GFT:
+    def __init__(self, world: HWorld, P0, cfg: GFTConfig):
         self.w, self.P, self.cfg = world, [p.copy() for p in P0], cfg
         e = world.env
         self.ground = np.zeros((e.K, e.N, e.N))
@@ -158,6 +158,9 @@ class RLConfig:
     episodes_per_round: int = 256
     group_size: int = 8
     lr: float = 300.0
+    schedule: str = "const"    # const | linear (decays to final_frac of lr over total_rounds)
+    final_frac: float = 0.1
+    total_rounds: int = 0
 
 
 class PolicyGradient:
@@ -206,7 +209,15 @@ class PolicyGradient:
             grad = np.zeros_like(self.theta[i])
             np.add.at(grad, (slots, targets, pre[i], dig[i]), adv)
             np.add.at(grad, (slots, targets, pre[i]), -adv[..., None] * P[i][slots, targets, pre[i]])
-            self.theta[i] += c.lr * grad / len(slots)
+            self.theta[i] += self._lr() * grad / len(slots)
+        self.t = getattr(self, "t", 0) + 1
+
+    def _lr(self):
+        c = self.cfg
+        if c.schedule == "linear":
+            frac = min(1.0, getattr(self, "t", 0) / max(1, c.total_rounds))
+            return c.lr * (1 - (1 - c.final_frac) * frac)
+        return c.lr
 
 
 @dataclass
@@ -235,10 +246,10 @@ class FilteredBC:
 
 
 def make_learner(arm, world, P0, overrides):
-    if arm == "glft":
-        return GLFT(world, P0, GLFTConfig(**overrides))
-    if arm == "glft-unfactored":
-        return GLFT(world, P0, GLFTConfig(factored=False, **overrides))
+    if arm == "gft":
+        return GFT(world, P0, GFTConfig(**overrides))
+    if arm == "gft-unfactored":
+        return GFT(world, P0, GFTConfig(factored=False, **overrides))
     if arm == "fbc-verifier":
         return FilteredBC(world, P0, FBCConfig(**overrides))
     algo, reward = arm.split("-")
@@ -249,6 +260,8 @@ def run(arm, env: HEnv, seed=0, budget=65536, eval_every=2048, overrides=None):
     world = HWorld(env, np.random.default_rng(seed))
     P0 = conditionals(env.flat().base_table(), env.b, env.k)
     learner = make_learner(arm, world, P0, overrides or {})
+    if hasattr(learner.cfg, "total_rounds"):
+        learner.cfg.total_rounds = budget // learner.cfg.episodes_per_round
     curve = []
 
     def log():

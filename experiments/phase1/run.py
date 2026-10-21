@@ -4,8 +4,8 @@ Every arm starts from the same pretrained base policy (same seed => same weights
 per-requirement competence is ~q, so the initial success rate is ~q^m.
 
 Example:
-  uv run python experiments/phase1/run.py --arm glft --m 4 --seed 0 --budget 20000
-Arms: glft | reinforce-{bin,frac,parse} | rloo-* | grpo-* | ppo-* | fbc-{verifier,all_positive}
+  uv run python experiments/phase1/run.py --arm gft --m 4 --seed 0 --budget 20000
+Arms: gft | reinforce-{bin,frac,parse} | rloo-* | grpo-* | ppo-* | fbc-{verifier,all_positive}
 """
 
 import argparse
@@ -15,19 +15,19 @@ from pathlib import Path
 
 import torch
 
-from glft.algos.common import Curve, evaluate, pretrain_base
-from glft.algos.glft_neural import GLFT, GLFTConfig
-from glft.algos.lang_baselines import FilteredBC, FilteredBCConfig
-from glft.algos.rl_neural import PolicyGradient, RLConfig
-from glft.envs.reqworld import ReqWorldConfig
-from glft.feedback.logical_form import TeacherConfig
-from glft.models.set_policy import SetPolicy
-from glft.models.transformer import Policy
+from gft.algos.common import Curve, evaluate, pretrain_base
+from gft.algos.gft_neural import GFT, GFTConfig
+from gft.algos.lang_baselines import FilteredBC, FilteredBCConfig
+from gft.algos.rl_neural import PolicyGradient, RLConfig
+from gft.envs.reqworld import ReqWorldConfig
+from gft.feedback.logical_form import TeacherConfig
+from gft.models.set_policy import SetPolicy
+from gft.models.transformer import Policy
 
 
 def build(arm, policy, wcfg, tcfg, gen, overrides):
-    if arm == "glft":
-        return GLFT(policy, wcfg, tcfg, GLFTConfig(**overrides), gen)
+    if arm == "gft":
+        return GFT(policy, wcfg, tcfg, GFTConfig(**overrides), gen)
     if arm.startswith("fbc-"):
         return FilteredBC(policy, wcfg, tcfg, FilteredBCConfig(accept=arm[4:], **overrides), gen)
     algo, reward = arm.split("-")

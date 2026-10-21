@@ -1,4 +1,4 @@
-"""L1-H horizon sweep: how GLFT vs RL scale with chain depth k (horizon H = m * k).
+"""L1-H horizon sweep: how GFT vs RL scale with chain depth k (horizon H = m * k).
 
 Sweep A  fixed outcome space N = 64, (b, k) in {(64,1), (8,2), (4,3), (2,6)}: depth only.
 Sweep B  fixed branching b = 4, k in {1, 2, 3, 4} (N = 4 ... 256): longer tasks, more outcomes.
@@ -18,14 +18,14 @@ from pathlib import Path
 
 import numpy as np
 
-from glft.l1_horizon import HEnv, run
-from glft.l1_tabular import episodes_to
+from gft.l1_horizon import HEnv, run
+from gft.l1_tabular import episodes_to
 
 OUT = Path("outputs/l1")
 LRS = [100, 300, 1000, 3000, 10000, 30000]
 GRIDS = {
-    "glft": [dict(beta=0.01, beta_unrep=bu, beta_distill=bd) for bu in (10, 100) for bd in (2, 4, 8)],
-    "glft[p/f]": [dict(beta=0.01, beta_unrep=bu, beta_distill=bd) for bu in (10, 100) for bd in (2, 4, 8)],
+    "gft": [dict(beta=0.01, beta_unrep=bu, beta_distill=bd) for bu in (10, 100) for bd in (2, 4, 8)],
+    "gft[p/f]": [dict(beta=0.01, beta_unrep=bu, beta_distill=bd) for bu in (10, 100) for bd in (2, 4, 8)],
     "fbc-verifier": [dict(beta=b) for b in (0.003, 0.03, 0.3)],
     **{arm: [dict(lr=lr) for lr in LRS] for arm in ("grpo-frac", "rloo-frac", "grpo-parse", "grpo-align")},
 }

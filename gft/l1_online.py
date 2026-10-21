@@ -1,4 +1,4 @@
-"""Incremental (SGD) GLFT, the batched form of the paper's Online GLFT (Algorithm 2), tabular.
+"""Incremental (SGD) GFT, the batched form of the paper's Online GFT (Algorithm 2), tabular.
 
 Like policy-gradient methods, each round collects a batch and takes a few gradient steps; there is
 no full MLE fit or full distillation in an inner loop, and no replay (fresh data each round):
@@ -8,8 +8,14 @@ no full MLE fit or full distillation in an inner loop, and no replay (fresh data
             X+ ~ pi^fb_phi(. | D', F*) for a batch; `epochs` passes of minibatch SGD on the clean
             policy theta minimizing -log pi_theta(X+ | D') with X+ held fixed.
 batch = minibatch = 1, epochs = 1 recovers Algorithm 2 exactly.
-Step sizes: aux beta_t, clean alpha_t; constant, or the paper's two-timescale schedule
-beta_t = beta (1+t)^-0.6, alpha_t = alpha (1+t)^-0.9.
+Step sizes: aux beta_t, clean alpha_t; constant, the paper's two-timescale schedule
+beta_t = beta (1+t)^-0.6, alpha_t = alpha (1+t)^-0.9, or "linear": the clean step decays linearly
+to `final_frac` of its value over the budget (aux constant).
+
+Ideal-feedback calibration (Section 9, Eq. 41): by default G* is the teacher applied to an
+all-satisfied execution. `gstar_kappa` changes how often G* mentions each requirement, and
+`gstar_error` makes G* describe a wrong (hallucinated) outcome for a mentioned requirement with
+that probability -- an approximate generator G~ != G*.
 
 Clean policy theta: per-step softmax logits theta[i][k, w, prefix, d] (same as the RL baselines).
 Auxiliary policy phi: log-linear in request and per-requirement feedback features, per step:
@@ -32,9 +38,9 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from glft.l1_horizon import HEnv, HWorld, path_steps
-from glft.l1_intents import CORRECT, HINT, Profile, teach
-from glft.l1_tabular import Resources
+from gft.l1_horizon import HEnv, HWorld, path_steps
+from gft.l1_intents import CORRECT, HINT, Profile, teach
+from gft.l1_tabular import Resources
 
 
 def softmax(z):
@@ -45,7 +51,7 @@ def softmax(z):
 
 def features(msg, slots, m):
     """Per-requirement feedback features of a message (all (n, m) arrays)."""
-    from glft.l1_intents import N_GROUPS
+    from gft.l1_intents import N_GROUPS
     fail = np.isin(msg.intent, [CORRECT, HINT]) | np.isin(msg.intent2, [CORRECT, HINT])
     return dict(
         out=msg.revealed,                                                    # -1 or outcome
@@ -64,12 +70,19 @@ class OnlineConfig:
     epochs: int = 1
     lr_aux: float = 1000.0     # beta: auxiliary step size (per minibatch-average gradient)
     lr_clean: float = 30.0     # alpha: clean step size
-    schedule: str = "const"    # const | two_timescale
+    schedule: str = "const"    # const | two_timescale | linear
+    final_frac: float = 0.1    # linear schedule: clean step at the end of the budget, relative
+    total_rounds: int = 0      # set by run() from the budget (needed by the linear schedule)
+    gstar_kappa: float = -1.0  # < 0: same mention rate as the teacher (calibrated)
+    gstar_error: float = 0.0   # P(G* reports a wrong outcome for a mentioned requirement)
+    unm_lr_frac: float = 1.0   # step-size multiplier for phi_unm ("requirement not mentioned" term)
+    stage2_grad: str = "sample"  # sample: onehot(a) - pi_theta (paper); expected: pi^fb - pi_theta at each
+                                 # visited step (same expected gradient, lower variance; logit distillation)
     factored: bool = True
     aux_base: str = "clean"    # clean: logits = theta + feedback terms; own: logits = phi_req + feedback terms
 
 
-class OnlineGLFT:
+class OnlineGFT:
     def __init__(self, world: HWorld, P0, prof: Profile, cfg: OnlineConfig):
         self.w, self.prof, self.cfg = world, prof, cfg
         e, h = world.env, world.h
@@ -85,6 +98,8 @@ class OnlineGLFT:
         self.unm = [np.zeros(shape(i, K, N)) for i in range(k)]
         self.t = 0
         self.res = Resources()
+        from dataclasses import replace
+        self._gstar_prof = prof if cfg.gstar_kappa < 0 else replace(prof, kappa_sat=cfg.gstar_kappa)
 
     @property
     def P(self):
@@ -94,6 +109,9 @@ class OnlineGLFT:
         c = self.cfg
         if c.schedule == "const":
             return c.lr_aux, c.lr_clean
+        if c.schedule == "linear":
+            frac = min(1.0, self.t / max(1, c.total_rounds))
+            return c.lr_aux, c.lr_clean * (1 - (1 - c.final_frac) * frac)
         return c.lr_aux * (1 + self.t) ** -0.6, c.lr_clean * (1 + self.t) ** -0.9
 
     @staticmethod
@@ -141,7 +159,7 @@ class OnlineGLFT:
                 np.add.at(self.req[i], (slots, targets, pre[i]), g)
             else:
                 un = self._uninformed(f)
-                np.add.at(self.unm[i], (slots[un], targets[un], pre[i][un]), g[un])
+                np.add.at(self.unm[i], (slots[un], targets[un], pre[i][un]), c.unm_lr_frac * g[un])
             sel = f["out"] >= 0
             if c.factored:
                 np.add.at(self.out[i], (slots[sel], f["out"][sel], pre[i][sel]), g[sel])
@@ -154,12 +172,18 @@ class OnlineGLFT:
             es = f["eval"] >= 0
             np.add.at(self.eval[i], (slots[es], f["eval"][es], pre[i][es]), g[es])
 
-    def _clean_step(self, lr, slots, targets, pre, dig):
-        """One SGD step on theta: minibatch-average gradient of log pi_theta(X+ | D'), X+ fixed."""
+    def _clean_step(self, lr, slots, targets, pre, dig, f=None):
+        """One SGD step on theta: minibatch-average gradient of log pi_theta(X+ | D'), X+ fixed.
+
+        With stage2_grad = "expected", the sampled action's one-hot at each visited step is replaced
+        by pi^fb's action distribution there (needs the ideal-feedback features f)."""
         P = self.P
         for i in range(self.w.h.k):
             g = -P[i][slots, targets, pre[i]]
-            np.put_along_axis(g, dig[i][..., None], np.take_along_axis(g, dig[i][..., None], -1) + 1, -1)
+            if self.cfg.stage2_grad == "expected":
+                g += softmax(self._aux_logits(i, slots, targets, pre[i], f))
+            else:
+                np.put_along_axis(g, dig[i][..., None], np.take_along_axis(g, dig[i][..., None], -1) + 1, -1)
             np.add.at(self.theta[i], (slots, targets, pre[i]), (lr / len(slots)) * g)
 
     def _minibatches(self, n):
@@ -185,25 +209,31 @@ class OnlineGLFT:
                            {k_: v[mb] for k_, v in f.items()})
         # Stage II: a batch of ideal-feedback-conditioned rollouts of the updated phi; a few SGD steps on theta.
         s2, t2 = w.requests(c.stage2_batch)
-        f2 = features(teach(w.rng, self.prof, s2, t2, t2), s2, e.m)
+        f2 = features(teach(w.rng, self._gstar_prof, s2, t2, t2), s2, e.m)
+        if c.gstar_error > 0:
+            bad = (f2["out"] >= 0) & (w.rng.random(f2["out"].shape) < c.gstar_error)
+            f2["out"] = np.where(bad, (t2 + w.rng.integers(1, e.N, t2.shape)) % e.N, f2["out"])
         p2 = self._sample_aux(s2, t2, f2)
         self.res.env_episodes += c.stage2_batch
         self.res.gstar_samples += c.stage2_batch
         pre2, dig2 = path_steps(p2, h.b, h.k)
         for mb in self._minibatches(c.stage2_batch):
-            self._clean_step(alpha, s2[mb], t2[mb], [p[mb] for p in pre2], [d[mb] for d in dig2])
+            self._clean_step(alpha, s2[mb], t2[mb], [p[mb] for p in pre2], [d[mb] for d in dig2],
+                             {k_: v[mb] for k_, v in f2.items()})
         self.t += 1
 
 
 def run(arm, env: HEnv, prof: Profile, seed=0, budget=65536, eval_every=2048, overrides=None):
-    """glft-sgd | glft-sgd-unf here; any other arm is delegated to its module."""
-    from glft.l1_horizon import conditionals
-    if arm not in ("glft-sgd", "glft-sgd-unf"):
-        from glft.l1_intents import run as run_intents
+    """gft-sgd | gft-sgd-unf here; any other arm is delegated to its module."""
+    from gft.l1_horizon import conditionals
+    if arm not in ("gft-sgd", "gft-sgd-unf"):
+        from gft.l1_intents import run as run_intents
         return run_intents(arm, env, prof, seed=seed, budget=budget, eval_every=eval_every, overrides=overrides)
     world = HWorld(env, np.random.default_rng(seed))
     P0 = conditionals(env.flat().base_table(), env.b, env.k)
-    learner = OnlineGLFT(world, P0, prof, OnlineConfig(factored=(arm == "glft-sgd"), **(overrides or {})))
+    cfg = OnlineConfig(factored=(arm == "gft-sgd"), **(overrides or {}))
+    cfg.total_rounds = budget // (cfg.batch + cfg.stage2_batch)
+    learner = OnlineGFT(world, P0, prof, cfg)
     curve, nxt = [], 0
     while True:
         if learner.res.env_episodes >= nxt:

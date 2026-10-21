@@ -7,7 +7,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from glft.feedback.audit_teacher import audit_channel, ideal_feedback, subset_probs_independent
+from gft.feedback.audit_teacher import audit_channel, ideal_feedback, subset_probs_independent
 
 
 @dataclass

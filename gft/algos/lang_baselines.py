@@ -9,9 +9,9 @@ from dataclasses import dataclass
 
 import torch
 
-from glft.algos.common import Episodes, Resources, rollout, train_bc
-from glft.envs.reqworld import sample_requests
-from glft.feedback.logical_form import NEG, TeacherConfig, audit
+from gft.algos.common import Episodes, Resources, rollout, train_bc
+from gft.envs.reqworld import sample_requests
+from gft.feedback.logical_form import NEG, TeacherConfig, audit
 
 
 @dataclass

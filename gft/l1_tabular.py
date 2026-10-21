@@ -11,13 +11,13 @@ Teacher (truthful partial audit): requirement j is reported with prob kappa_sat 
 reveal=False, polarity only. G* reports each requirement with prob kappa_sat, as satisfied.
 
 Learners:
-  GLFT (factored)     Stage I fits the exact-form posterior pi^fb:
+  GFT (factored)     Stage I fits the exact-form posterior pi^fb:
                         reported cell -> grounding table over (slot, reported outcome), pooled over
                                          all targets and all rounds (sigma is deterministic, so this
                                          part of the posterior is policy-independent);
                         unreported    -> per-(slot, target) counts from the current round.
                       Stage II rolls out pi^fb under F* ~ G* and distills by counts.
-  GLFT (unfactored)   reported cell conditioned on (slot, target, report): only POS reports of the
+  GFT (unfactored)   reported cell conditioned on (slot, target, report): only POS reports of the
                       same target inform it, i.e. no cross-request pooling. Isolates the mechanism.
   RL                  softmax logits theta[k, w, a]; REINFORCE / RLOO / GRPO with terminal rewards
                       bin / frac / parse, or the ORACLE per-requirement reward `align`.
@@ -112,7 +112,7 @@ def smooth(counts, prior, beta):
 
 
 @dataclass
-class GLFTConfig:
+class GFTConfig:
     episodes_per_round: int = 256
     stage2_per_round: int = 256
     factored: bool = True
@@ -122,8 +122,8 @@ class GLFTConfig:
     stage2_exact: bool = False  # distill the exact expectation over G* (idealized; no rollouts)
 
 
-class GLFT:
-    def __init__(self, world: World, P0, cfg: GLFTConfig):
+class GFT:
+    def __init__(self, world: World, P0, cfg: GFTConfig):
         self.w, self.P, self.cfg = world, P0.copy(), cfg
         K, N = world.env.K, world.env.N
         self.ground = np.zeros((K, N, N))  # [k, outcome-or-target, a] counts from reported requirements
@@ -248,8 +248,8 @@ class FilteredBC:
 
 
 ARMS = {
-    "glft": lambda w, P0, o: GLFT(w, P0, GLFTConfig(**o)),
-    "glft-unfactored": lambda w, P0, o: GLFT(w, P0, GLFTConfig(factored=False, **o)),
+    "gft": lambda w, P0, o: GFT(w, P0, GFTConfig(**o)),
+    "gft-unfactored": lambda w, P0, o: GFT(w, P0, GFTConfig(factored=False, **o)),
     "fbc-verifier": lambda w, P0, o: FilteredBC(w, P0, FBCConfig(**o)),
     "fbc-all_positive": lambda w, P0, o: FilteredBC(w, P0, FBCConfig(accept="all_positive", **o)),
 }

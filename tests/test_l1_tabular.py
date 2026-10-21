@@ -1,8 +1,8 @@
 import numpy as np
 import pytest
 
-from glft.algos.glft_exact import exact_slot_recursion
-from glft.l1_tabular import GLFT, Env, GLFTConfig, PolicyGradient, RLConfig, World, run
+from gft.algos.gft_exact import exact_slot_recursion
+from gft.l1_tabular import GFT, Env, GFTConfig, PolicyGradient, RLConfig, World, run
 
 
 def test_base_table_competence_and_normalization():
@@ -18,10 +18,10 @@ def test_base_table_competence_and_normalization():
 
 @pytest.mark.parametrize("factored", [True, False])
 @pytest.mark.parametrize("kappa", [0.25, 0.5, 1.0])
-def test_glft_tracks_exact_recursion_with_ample_data(factored, kappa):
+def test_gft_tracks_exact_recursion_with_ample_data(factored, kappa):
     env = Env(N=8, m=2, q=0.3, kappa_sat=kappa, kappa_viol=kappa)
     w = World(env, np.random.default_rng(1))
-    learner = GLFT(w, env.base_table(), GLFTConfig(episodes_per_round=200_000, factored=factored, beta=1e-6,
+    learner = GFT(w, env.base_table(), GFTConfig(episodes_per_round=200_000, factored=factored, beta=1e-6,
                                                      beta_unrep=1e9, stage2_exact=True))
     ref = exact_slot_recursion(0.3, kappa, kappa, 3)
     for t in range(1, 4):
@@ -43,14 +43,14 @@ def test_align_reward_gives_per_requirement_advantage():
 def test_descriptive_feedback_beats_pass_fail_when_base_rarely_correct():
     env = dict(N=16, m=4, q=0.02)
     o = dict(beta=0.01, beta_unrep=100, beta_distill=4)
-    desc = run("glft", Env(**env), seed=0, budget=16384, overrides=o).curve[-1]["success"]
-    pf = run("glft", Env(reveal=False, **env), seed=0, budget=16384, overrides=o).curve[-1]["success"]
+    desc = run("gft", Env(**env), seed=0, budget=16384, overrides=o).curve[-1]["success"]
+    pf = run("gft", Env(reveal=False, **env), seed=0, budget=16384, overrides=o).curve[-1]["success"]
     assert desc > 0.8 and pf < 0.2
 
 
 def test_horizon_k1_matches_flat_and_base_path_law_is_depth_invariant():
-    from glft.l1_horizon import HEnv, conditionals, path_prob
-    from glft.l1_horizon import run as hrun
+    from gft.l1_horizon import HEnv, conditionals, path_prob
+    from gft.l1_horizon import run as hrun
     h1 = HEnv(b=16, k=1, m=3, q=0.1)
     flat = run("grpo-frac", h1.flat(), seed=0, budget=4096, eval_every=2048, overrides=dict(lr=300)).curve
     deep = hrun("grpo-frac", h1, seed=0, budget=4096, eval_every=2048, overrides=dict(lr=300))
@@ -65,7 +65,7 @@ def test_horizon_k1_matches_flat_and_base_path_law_is_depth_invariant():
 
 
 def test_intent_teacher_semantics_and_ideal_calibration():
-    from glft.l1_intents import CONFIRM, CORRECT, HINT, NONE, PROFILES, teach
+    from gft.l1_intents import CONFIRM, CORRECT, HINT, NONE, PROFILES, teach
     rng = np.random.default_rng(0)
     env = Env(N=16, m=4)
     w = World(env, rng)
@@ -88,9 +88,9 @@ def test_intent_teacher_semantics_and_ideal_calibration():
 
 
 def test_path_table_and_optimistic_parser():
-    from glft.l1_horizon import HEnv, conditionals
-    from glft.l1_intents import PROFILES, ParsePG, path_table
-    from glft.l1_horizon import HWorld, RLConfig
+    from gft.l1_horizon import HEnv, conditionals
+    from gft.l1_intents import PROFILES, ParsePG, path_table
+    from gft.l1_horizon import HWorld, RLConfig
     h = HEnv(b=4, k=3, q=0.1)
     base = h.flat().base_table()
     np.testing.assert_allclose(path_table(conditionals(base, 4, 3)), base, atol=1e-12)

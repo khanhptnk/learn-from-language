@@ -3,9 +3,9 @@
 Rewards (plan: information-matched arms):
   bin    1{all requirements satisfied}     (oracle verifier)
   frac   fraction of requirements satisfied (full audit)
-  parse  s_D(F) from the same partial-audit teacher GLFT sees
+  parse  s_D(F) from the same partial-audit teacher GFT sees
   align  ORACLE dense reference: requirement j's indicator credited to the action that set it.
-         Needs the action-requirement alignment GLFT never gets; one-shot policies only.
+         Needs the action-requirement alignment GFT never gets; one-shot policies only.
 All rewards except `align` are terminal: one scalar per episode.
 """
 
@@ -13,9 +13,9 @@ from dataclasses import dataclass
 
 import torch
 
-from glft.algos.common import Resources, rollout
-from glft.envs.reqworld import sample_requests
-from glft.feedback.logical_form import TeacherConfig, audit, parse_reward
+from gft.algos.common import Resources, rollout
+from gft.envs.reqworld import sample_requests
+from gft.feedback.logical_form import TeacherConfig, audit, parse_reward
 
 
 @dataclass

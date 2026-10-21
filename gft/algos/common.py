@@ -4,8 +4,8 @@ from dataclasses import dataclass, field
 
 import torch
 
-from glft.envs.reqworld import ReqWorldConfig, Requests, demo_actions, final_state, requirement_status, sample_requests
-from glft.feedback.logical_form import Message
+from gft.envs.reqworld import ReqWorldConfig, Requests, demo_actions, final_state, requirement_status, sample_requests
+from gft.feedback.logical_form import Message
 
 
 @dataclass

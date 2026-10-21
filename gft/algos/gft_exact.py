@@ -1,4 +1,4 @@
-"""Exact-population GLFT on an enumerated execution space (paper Section 4).
+"""Exact-population GFT on an enumerated execution space (paper Section 4).
 
 Executions and feedback messages are indexed 0..n_x-1 and 0..n_f-1.
 `F[x, f]` is the teacher channel F(f | x); `g_star[f]` is the ideal-feedback law G*.
@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from glft.metrics import kl, normalized_entropy_on
+from gft.metrics import kl, normalized_entropy_on
 
 
 def feedback_marginal(p, F):
@@ -16,8 +16,8 @@ def feedback_marginal(p, F):
     return p @ F
 
 
-def glft_step(p, F, g_star):
-    """One exact GLFT round (Lemma 4.1).
+def gft_step(p, F, g_star):
+    """One exact GFT round (Lemma 4.1).
 
     Stage I's population MLE is the Bayes posterior r(x | f) = p(x) F(f|x) / m(f);
     Stage II marginalizes it over f ~ G*, giving p_{t+1}(x) = p(x) W(x) with
@@ -43,11 +43,11 @@ class ExactRun:
     extra: dict = field(default_factory=dict)
 
 
-def run_glft_exact(p0, F, g_star, optimal, T, pbar=None):
-    """Iterate exact GLFT for T rounds and record the paper's potentials."""
+def run_gft_exact(p0, F, g_star, optimal, T, pbar=None):
+    """Iterate exact GFT for T rounds and record the paper's potentials."""
     ps = [np.asarray(p0, dtype=float)]
     for _ in range(T):
-        ps.append(glft_step(ps[-1], F, g_star)[0])
+        ps.append(gft_step(ps[-1], F, g_star)[0])
     ps = np.stack(ps)
     phi = np.array([kl(g_star, feedback_marginal(p, F)) for p in ps])
     v = np.array([kl(pbar, p) for p in ps]) if pbar is not None else np.full(T + 1, np.nan)
@@ -74,7 +74,7 @@ def bound_quality(v0, kappa, T):
 
 
 def exact_slot_recursion(a0, kappa_sat, kappa_viol, T):
-    """Exact GLFT on one requirement of a factorized execution law under the partial-audit teacher.
+    """Exact GFT on one requirement of a factorized execution law under the partial-audit teacher.
 
     With independent audits and a factorized p_t, the update (10) factorizes over requirements.
     For one requirement with success probability a, the ideal messages are "not reported"

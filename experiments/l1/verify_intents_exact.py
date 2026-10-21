@@ -1,10 +1,10 @@
-"""Exact-population check: does GLFT converge under each teacher-intent profile?
+"""Exact-population check: does GFT converge under each teacher-intent profile?
 
 Small instance: m = 2 requirements (slots in different VAGUE groups), N = 3 outcomes each,
 targets (0, 0), so executions are outcome vectors (9 of them), optionally times a style bit.
-Every random choice of the teacher in `glft.l1_intents.teach` is enumerated to get the exact
+Every random choice of the teacher in `gft.l1_intents.teach` is enumerated to get the exact
 channel F(f | x); G* is the same teacher on the optimal execution (calibrated by construction).
-Then `run_glft_exact` iterates the exact update p <- p * W.
+Then `run_gft_exact` iterates the exact update p <- p * W.
 
 Extra teachers beyond the sweep's profiles:
   chatter            says nothing informative                  -> no separation, should NOT converge
@@ -22,8 +22,8 @@ from collections import defaultdict
 
 import numpy as np
 
-from glft.algos.glft_exact import run_glft_exact
-from glft.l1_intents import NONE, PROFILES, REVEALS_OUTCOME, Profile, desc_share_profile
+from gft.algos.gft_exact import run_gft_exact
+from gft.l1_intents import NONE, PROFILES, REVEALS_OUTCOME, Profile, desc_share_profile
 
 M, N = 2, 3
 TARGETS = (0, 0)
@@ -103,7 +103,7 @@ def report(name, prof, T=3000, **kw):
     if g.sum() == 0 or (g[F.T @ p0 == 0] > 0).any():
         print(f"{name:34s} coverage fails (ideal message impossible under p0)")
         return
-    run = run_glft_exact(p0, F, g, opt, T=T)
+    run = run_gft_exact(p0, F, g, opt, T=T)
     s = run.success
     extra = ""
     if kw.get("styles", 1) > 1:

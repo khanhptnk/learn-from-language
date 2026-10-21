@@ -1,10 +1,10 @@
-"""Tier 0: exact-population GLFT experiments.
+"""Tier 0: exact-population GFT experiments.
 
 E1  Section 7 non-monotone example: trajectory of p_t(C), Phi_t and bound (18).
 E2  Mixture aliasing: feedback matched at round 0, success stuck.
 E3  Bound tightness on random audit instances: observed vs (13), (25); empirical decay rate.
 E4  Rounds to success vs (kappa, m), compared with the gamma = kappa/m scaling of the bound.
-E5  Comparators (vanilla PG, natural PG, filtered BC) vs GLFT: success and diversity over C.
+E5  Comparators (vanilla PG, natural PG, filtered BC) vs GFT: success and diversity over C.
 
 Usage: uv run python experiments/tier0/run_tier0.py [--out outputs/tier0]
 """
@@ -19,11 +19,11 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 
-from glft.algos.glft_exact import bound_failure, bound_phi, glft_step, run_glft_exact
-from glft.algos.pg_exact import run_filtered_bc, run_natural_pg, run_softmax_pg
-from glft.envs.bandit import audit_instance, mixture_aliasing, random_audit_instance, section7_nonmonotone
-from glft.feedback.audit_teacher import all_positive_accept
-from glft.metrics import normalized_entropy_on
+from gft.algos.gft_exact import bound_failure, bound_phi, gft_step, run_gft_exact
+from gft.algos.pg_exact import run_filtered_bc, run_natural_pg, run_softmax_pg
+from gft.envs.bandit import audit_instance, mixture_aliasing, random_audit_instance, section7_nonmonotone
+from gft.feedback.audit_teacher import all_positive_accept
+from gft.metrics import normalized_entropy_on
 
 
 def rounds_to(success, threshold):
@@ -34,7 +34,7 @@ def rounds_to(success, threshold):
 def e1_section7(out):
     inst = section7_nonmonotone()
     T = 500
-    run = run_glft_exact(inst.p0, inst.F, inst.g_star, inst.optimal, T=T, pbar=inst.pbar)
+    run = run_gft_exact(inst.p0, inst.F, inst.g_star, inst.optimal, T=T, pbar=inst.pbar)
     ts = np.arange(T + 1)
     fig, ax = plt.subplots(1, 2, figsize=(10, 3.6))
     ax[0].semilogx(ts + 1, run.success, label="$p_t(\\mathcal{C})$")
@@ -64,7 +64,7 @@ def e2_aliasing(out):
     res = {}
     for p0 in [(0.1, 0.45, 0.45), (0.1, 0.6, 0.3), (0.1, 0.8, 0.1)]:
         inst = mixture_aliasing(p0)
-        run = run_glft_exact(inst.p0, inst.F, inst.g_star, inst.optimal, T=2000, pbar=inst.pbar)
+        run = run_gft_exact(inst.p0, inst.F, inst.g_star, inst.optimal, T=2000, pbar=inst.pbar)
         res[str(p0)] = {"success_final": float(run.success[-1]), "phi_final": float(run.phi[-1])}
     return res
 
@@ -80,7 +80,7 @@ def e3_tightness(out, n=500, T=2000, seed=0):
         m = int(rng.integers(1, 5))
         inst = random_audit_instance(rng, m=m, n_opt=int(rng.integers(1, 4)), n_bad=int(rng.integers(1, 10)),
                                      kappa=rng.uniform(0.1, 1.0, size=m))
-        run = run_glft_exact(inst.p0, inst.F, inst.g_star, inst.optimal, T=T, pbar=inst.pbar)
+        run = run_gft_exact(inst.p0, inst.F, inst.g_star, inst.optimal, T=T, pbar=inst.pbar)
         fail = 1 - run.success
         bf = bound_failure(run.v[0], inst.gamma, ts)
         bp = bound_phi(run.v[0], ts)
@@ -130,7 +130,7 @@ def e4_kappa_m(out, opt_mass=0.05, T=20000):
             inst = full_pattern_instance(m, k, opt_mass)
             p, t = inst.p0, 0
             while p[inst.optimal].sum() < 0.9 and t < T:
-                p, t = glft_step(p, inst.F, inst.g_star)[0], t + 1
+                p, t = gft_step(p, inst.F, inst.g_star)[0], t + 1
             rounds.append(t)
         table[m] = dict(zip(map(str, kappas), rounds))
         ax.loglog(np.array(kappas) / m, rounds, "o-", label=f"m={m}")
@@ -155,7 +155,7 @@ def e5_comparators(out, T=300):
     r_bin = inst.optimal.astype(float)
     r_audit = inst.F @ inst.s  # E[s(F) | x]: the information-matched scalar reward
     curves = {
-        "GLFT": run_glft_exact(inst.p0, inst.F, inst.g_star, inst.optimal, T=T).p,
+        "GFT": run_gft_exact(inst.p0, inst.F, inst.g_star, inst.optimal, T=T).p,
         "filtered BC (partial audit)": run_filtered_bc(p0, all_positive_accept(R, kappa), T),
         "PG, R-bin, lr=10": run_softmax_pg(p0, r_bin, 10.0, T),
         "PG, R-audit, lr=10": run_softmax_pg(p0, r_audit, 10.0, T),

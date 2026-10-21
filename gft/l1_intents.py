@@ -22,21 +22,21 @@ to an all-satisfied execution, so it is calibrated by construction.
 Runs on the depth environment L1-H (k decisions per requirement; k = 1 is flat L1), with
 per-step tables built from path counts as in `l1_horizon`.
 
-Tabular GLFT keeps Stage I in exact Bayes form:
+Tabular GFT keeps Stage I in exact Bayes form:
   * a requirement whose message reveals its achieved outcome (DESC, CONFIRM, DIAG, CONTRAST)
     feeds the grounding table G[k, o, a], pooled over requests and rounds;
   * otherwise pi^fb conditions on the requirement's signature in the message. Only the
     signatures that occur under G* are ever queried: not mentioned, its slot group not flagged by
     VAGUE, and EVAL absent or equal to m. Those cells are fit from current-round counts.
 Prescriptive content (CORRECT's target, HINT's argument) describes what *should* have been done;
-it never enters GLFT's model except as "this requirement failed".
+it never enters GFT's model except as "this requirement failed".
 """
 
 from dataclasses import dataclass, field
 
 import numpy as np
 
-from glft.l1_horizon import HEnv, HWorld, PolicyGradient, RLConfig, conditionals, smooth_steps
+from gft.l1_horizon import HEnv, HWorld, PolicyGradient, RLConfig, conditionals, smooth_steps
 
 
 def path_table(P):
@@ -45,7 +45,7 @@ def path_table(P):
     for Pi in P[1:]:
         cur = (cur[..., None] * Pi).reshape(cur.shape[0], cur.shape[1], -1)
     return cur
-from glft.l1_tabular import Resources
+from gft.l1_tabular import Resources
 
 NONE, DESC, CONFIRM, CORRECT, DIAG, CONTRAST, HINT = range(7)
 INTENT_NAMES = ["none", "desc", "confirm", "correct", "diag", "contrast", "hint"]
@@ -134,7 +134,7 @@ def teach(rng, prof: Profile, slots, targets, outc):
 
 
 @dataclass
-class GLFTConfig:
+class GFTConfig:
     episodes_per_round: int = 256
     stage2_per_round: int = 256
     beta: float = 0.01
@@ -145,8 +145,8 @@ class GLFTConfig:
                                 # "dist":   PROPOSED VARIANT, distill pi^fb's full distribution (soft counts)
 
 
-class GLFT:
-    def __init__(self, world: HWorld, P0, prof: Profile, cfg: GLFTConfig):
+class GFT:
+    def __init__(self, world: HWorld, P0, prof: Profile, cfg: GFTConfig):
         self.w, self.P, self.prof, self.cfg = world, [p.copy() for p in P0], prof, cfg
         e = world.env
         self.ground = np.zeros((e.K, e.N, e.N))
@@ -225,13 +225,15 @@ def run(arm, env: HEnv, prof: Profile, seed=0, budget=65536, eval_every=2048, ov
     world = HWorld(env, np.random.default_rng(seed))
     P0 = conditionals(env.flat().base_table(), env.b, env.k)
     o = dict(overrides or {})
-    if arm in ("glft", "glft-dist"):
-        learner = GLFT(world, P0, prof, GLFTConfig(**({"distill": "dist"} if arm == "glft-dist" else {}), **o))
+    if arm in ("gft", "gft-dist"):
+        learner = GFT(world, P0, prof, GFTConfig(**({"distill": "dist"} if arm == "gft-dist" else {}), **o))
     else:
         algo, reward = arm.split("-")
         assert reward == "parse"
         parser = o.pop("parser", "pessimistic")
         learner = ParsePG(world, P0, prof, RLConfig(algo=algo, reward=reward, **o), parser=parser)
+        if hasattr(learner.cfg, "total_rounds"):
+            learner.cfg.total_rounds = budget // learner.cfg.episodes_per_round
     curve = []
     nxt = 0
     while True:

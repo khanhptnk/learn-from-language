@@ -10,15 +10,15 @@ Request targets and reported outcomes share one outcome embedding table, as the 
 would in a language model; the argument head is separate, so the argument -> outcome map
 (sigma) must be learned. With `msg=None` the marker is FB_OFF: the request-only policy pi.
 
-Implements the same interface as `glft.models.transformer.Policy` (log_probs / sample over
+Implements the same interface as `gft.models.transformer.Policy` (log_probs / sample over
 (act_slots, act_values, lengths)), so every Phase 1 learner runs unchanged.
 """
 
 import torch
 from torch import nn
 
-from glft.envs.reqworld import ReqWorldConfig, Requests, noisy_args
-from glft.feedback.logical_form import Message
+from gft.envs.reqworld import ReqWorldConfig, Requests, noisy_args
+from gft.feedback.logical_form import Message
 
 T_REQ, T_FB_ON, T_FB_OFF, T_FB = range(4)
 

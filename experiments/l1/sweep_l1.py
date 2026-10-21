@@ -4,8 +4,8 @@
   uv run python experiments/l1/sweep_l1.py regime   # uses tuned.json, writes outputs/l1/regime.json + plots
 
 Metric: area under the success curve (mean success over evaluation points up to the budget),
-and episodes to 50% / 90% success. The x-axis is environment episodes; GLFT's Stage II rollouts
-count as episodes (conservative for GLFT).
+and episodes to 50% / 90% success. The x-axis is environment episodes; GFT's Stage II rollouts
+count as episodes (conservative for GFT).
 """
 
 import argparse
@@ -18,7 +18,7 @@ from pathlib import Path
 
 import numpy as np
 
-from glft.l1_tabular import Env, episodes_to, run
+from gft.l1_tabular import Env, episodes_to, run
 
 OUT = Path("outputs/l1")
 BUDGET = 65536
@@ -26,9 +26,9 @@ BUDGET = 65536
 # Hyperparameter grids per arm (tuned on the tuning settings, then frozen).
 LRS = [30, 100, 300, 1000, 3000, 10000, 30000, 100000]
 GRIDS = {
-    "glft": [dict(beta=b, beta_unrep=bu, beta_distill=bd)
+    "gft": [dict(beta=b, beta_unrep=bu, beta_distill=bd)
              for b in (0.01, 0.1) for bu in (10, 100, 1000) for bd in (1, 2, 4, 8)],
-    "glft-unfactored": [dict(beta=b, beta_unrep=bu, beta_distill=bd)
+    "gft-unfactored": [dict(beta=b, beta_unrep=bu, beta_distill=bd)
                         for b in (0.01, 0.1) for bu in (10, 100, 1000) for bd in (1, 2, 4, 8)],
     "fbc-verifier": [dict(beta=b) for b in (0.003, 0.01, 0.03, 0.1, 0.5, 2)],
     "fbc-all_positive": [dict(beta=b) for b in (0.1, 0.5, 2, 8, 32)],
@@ -80,7 +80,7 @@ def tune(procs):
 
 
 REGIME = dict(N=[16, 64], m=[2, 4, 8], q=[0.02, 0.1, 0.35], reveal=[True, False], kappa=[0.25, 0.5, 1.0])
-MAIN_ARMS = ["glft", "glft-unfactored", "fbc-verifier", "fbc-all_positive",
+MAIN_ARMS = ["gft", "gft-unfactored", "fbc-verifier", "fbc-all_positive",
              "grpo-bin", "grpo-frac", "grpo-parse", "rloo-frac", "rloo-parse", "grpo-align"]
 
 
@@ -91,9 +91,9 @@ def regime(procs, seeds):
         env = Env(N=N, m=m, q=q, reveal=reveal, kappa_sat=kappa, kappa_viol=kappa)
         for arm in MAIN_ARMS:
             # Feedback content only matters to arms that read feedback; skip duplicate runs.
-            if not reveal and arm != "glft":
+            if not reveal and arm != "gft":
                 continue
-            if kappa != 0.5 and not (arm.startswith("glft") or arm.endswith("parse") or arm == "fbc-all_positive"):
+            if kappa != 0.5 and not (arm.startswith("gft") or arm.endswith("parse") or arm == "fbc-all_positive"):
                 continue  # arms that never see the teacher do not depend on kappa
             for s in seeds:
                 specs.append((arm, env, s, best[arm]))
@@ -110,7 +110,7 @@ def summarize(res):
     for r in res:
         e = r["env"]
         rows.setdefault((e["N"], e["m"], e["q"], e["kappa_sat"], e["reveal"]), {}).setdefault(r["arm"], []).append(r)
-    cols = MAIN_ARMS + ["glft[p/f]"]
+    cols = MAIN_ARMS + ["gft[p/f]"]
     print(f"{'N':>3} {'m':>2} {'q':>5} {'kap':>4} " + " ".join(f"{a[:11]:>11}" for a in cols))
     for N, m, q, kappa in itertools.product(REGIME["N"], REGIME["m"], REGIME["q"], REGIME["kappa"]):
         line = f"{N:>3} {m:>2} {q:>5} {kappa:>4} "

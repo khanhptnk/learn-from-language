@@ -1,13 +1,13 @@
 import numpy as np
 import torch
 
-from glft.algos.common import execute, rollout
-from glft.algos.glft_exact import exact_slot_recursion, run_glft_exact
-from glft.algos.rl_neural import PolicyGradient, RLConfig
-from glft.envs.bandit import audit_instance
-from glft.envs.reqworld import ReqWorldConfig, arg_for, noisy_args, outcome_perm, sample_requests
-from glft.feedback.logical_form import NEG, POS, TeacherConfig, audit, ideal
-from glft.models.set_policy import SetPolicy
+from gft.algos.common import execute, rollout
+from gft.algos.gft_exact import exact_slot_recursion, run_gft_exact
+from gft.algos.rl_neural import PolicyGradient, RLConfig
+from gft.envs.bandit import audit_instance
+from gft.envs.reqworld import ReqWorldConfig, arg_for, noisy_args, outcome_perm, sample_requests
+from gft.feedback.logical_form import NEG, POS, TeacherConfig, audit, ideal
+from gft.models.set_policy import SetPolicy
 
 
 def test_sigma_is_a_permutation_and_inverts():
@@ -72,7 +72,7 @@ def test_set_policy_interface_and_align_reward():
     np.testing.assert_allclose(adv.view(16, 4, 3).sum(1), 0.0, atol=1e-4)
 
 
-def test_exact_slot_recursion_matches_enumerated_glft():
+def test_exact_slot_recursion_matches_enumerated_gft():
     # One requirement, 3 outcomes, factorized base: compare closed form with the enumerated update.
     R = np.array([[1], [0], [0]])
     p0 = np.array([0.2, 0.5, 0.3])
@@ -80,5 +80,5 @@ def test_exact_slot_recursion_matches_enumerated_glft():
         inst = audit_instance(R, np.array([ks]), p0)
         if kv != ks:  # audit_instance uses outcome-independent kappa; skip biased case there
             continue
-        run = run_glft_exact(inst.p0, inst.F, inst.g_star, inst.optimal, T=10)
+        run = run_gft_exact(inst.p0, inst.F, inst.g_star, inst.optimal, T=10)
         np.testing.assert_allclose(run.success, exact_slot_recursion(0.2, ks, kv, 10), atol=1e-12)

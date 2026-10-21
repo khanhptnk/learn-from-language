@@ -1,6 +1,6 @@
 """Shared small transformer policy for ReqWorld-C.
 
-One network serves both GLFT policies: with a feedback message it is pi^fb(a | h, D, F);
+One network serves both GFT policies: with a feedback message it is pi^fb(a | h, D, F);
 with `msg=None` it is the request-only policy pi(a | h, D). RL baselines use the latter.
 
 Sequence layout (length L = m + 1 + m + 2H):
@@ -17,8 +17,8 @@ bidirectionally; history attends causally to itself and fully to the prefix.
 import torch
 from torch import nn
 
-from glft.envs.reqworld import ReqWorldConfig, Requests
-from glft.feedback.logical_form import Message
+from gft.envs.reqworld import ReqWorldConfig, Requests
+from gft.feedback.logical_form import Message
 
 T_REQ, T_FB_ON, T_FB_OFF, T_FB, T_BOS, T_SLOT, T_VAL = range(7)
 

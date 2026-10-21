@@ -18,7 +18,7 @@ from dataclasses import dataclass
 
 import torch
 
-from glft.envs.reqworld import UNSET, Requests
+from gft.envs.reqworld import UNSET, Requests
 
 POS, NEG = 1, 2
 
