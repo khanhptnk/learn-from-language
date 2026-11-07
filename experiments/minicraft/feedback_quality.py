@@ -16,7 +16,6 @@ prob 0.7 / 0.4, else random), and random play. Measures:
 import re
 import sys
 import time
-from collections import Counter
 from pathlib import Path
 
 import numpy as np

@@ -4,34 +4,37 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from gft.minicraft.core import (GEM_ITEM, IRON, IRON_PICKAXE, PLANK, STICK, STONE, STONE_PICKAXE, WOOD,
-                                WOOD_PICKAXE)
-
-CROSS = -1  # pseudo-item: "agent ends east of the river"
+from gft.minicraft.core import (BRICK, CLAY, FENCE, FIBER, OVEN, PICKAXE, PLANK, RAFT, ROPE, SLING, STONE, WALL_ITEM,
+                                WELL, WOOD)
 
 
 @dataclass(frozen=True)
 class Goal:
-    phrase: str      # shown to the agent; never names the recipe chain
-    item: int        # inventory item checked, or CROSS
+    phrase: str      # shown to the agent; names the thing, never the recipe
+    item: int        # inventory item checked
     count: int = 1
-    depth: int = 1   # rough number of distinct sub-steps (for curricula and difficulty tiers)
+    depth: int = 1   # number of expert ops from nothing (for curricula and difficulty tiers)
 
 
-GOALS = (
-    Goal("gather firewood", WOOD, 2, 1),
-    Goal("make some planks", PLANK, 2, 2),
-    Goal("make a handle", STICK, 1, 3),
-    Goal("get ready to mine", WOOD_PICKAXE, 1, 5),
-    Goal("collect building stone", STONE, 2, 6),
-    Goal("upgrade your tools", STONE_PICKAXE, 1, 7),
-    Goal("get some metal", IRON, 1, 9),
-    Goal("make an iron tool", IRON_PICKAXE, 1, 11),
-    Goal("get across the river", CROSS, 1, 13),
-    Goal("fetch the gem", GEM_ITEM, 1, 15),
+GOALS = (                                     # ids in depth order (curricula and plots rely on it)
+    Goal("gather wood", WOOD, 2, 2),
+    Goal("gather fiber", FIBER, 2, 2),
+    Goal("dig clay", CLAY, 2, 2),
+    Goal("make rope", ROPE, 1, 2),
+    Goal("make bricks", BRICK, 1, 2),
+    Goal("make planks", PLANK, 2, 4),
+    Goal("make a pickaxe", PICKAXE, 1, 5),
+    Goal("build a raft", RAFT, 1, 5),
+    Goal("build an oven", OVEN, 1, 5),
+    Goal("build a well", WELL, 1, 5),
+    Goal("quarry stone", STONE, 1, 6),
+    Goal("make a sling", SLING, 1, 9),
+    Goal("build a wall", WALL_ITEM, 1, 9),
+    Goal("build a fence", FENCE, 1, 9),
 )
 N_GOALS = len(GOALS)
 MAX_GOALS = 3
+GOAL_ID = {g.phrase: i for i, g in enumerate(GOALS)}
 
 
 @dataclass(frozen=True)
@@ -43,10 +46,10 @@ class Alias:
 # Phase-2 requests: new phrases for goal combinations never requested together in phase 1 (the held-out pairs).
 # The phrases avoid the feedback vocabulary, so their meaning must be learned; the events they need are familiar.
 ALIASES = (
-    Alias("go treasure hunting", (9, 0)),       # fetch the gem + gather firewood
-    Alias("outfit the workshop", (7, 1)),       # make an iron tool + make some planks
-    Alias("prepare the dig", (6, 3)),           # get some metal + get ready to mine
-    Alias("build an outpost", (8, 4)),          # get across the river + collect building stone
+    Alias("set up camp", (GOAL_ID["build a wall"], GOAL_ID["gather wood"])),
+    Alias("prepare the harbour", (GOAL_ID["build a raft"], GOAL_ID["dig clay"])),
+    Alias("start the garden", (GOAL_ID["build a fence"], GOAL_ID["make rope"])),
+    Alias("open the kitchen", (GOAL_ID["build an oven"], GOAL_ID["quarry stone"])),
 )
 
 
@@ -74,6 +77,10 @@ def alias_requests(k, seeds):
     return Requests(goals, np.asarray(seeds), np.full(len(seeds), k))
 
 
+def compatible(gs):
+    return True
+
+
 def sample_requests(rng, n, seeds, goal_pool=None, max_goals=MAX_GOALS, combo_filter=None):
     """n requests of 1..max_goals distinct goals from `goal_pool` (default all), on the given world seeds.
     `combo_filter(frozenset) -> bool` rejects combinations (used for held-out compositional splits)."""
@@ -83,7 +90,8 @@ def sample_requests(rng, n, seeds, goal_pool=None, max_goals=MAX_GOALS, combo_fi
         while True:
             k = int(rng.integers(1, max_goals + 1))
             gs = rng.choice(pool, size=min(k, len(pool)), replace=False)
-            if combo_filter is None or combo_filter(frozenset(gs.tolist())):
+            fs = frozenset(gs.tolist())
+            if compatible(fs) and (combo_filter is None or combo_filter(fs)):
                 break
         goals[b, :len(gs)] = np.sort(gs)[::-1]                  # deepest first (the order the expert pursues)
     return Requests(goals, np.asarray(seeds))
@@ -98,9 +106,8 @@ def requirement_status(env, req: Requests):
     mask = req.goals >= 0
     g = np.where(mask, req.goals, 0)
     item, count = GOAL_ITEM[g], GOAL_COUNT[g]
-    have = np.take_along_axis(env.inv, np.where(item >= 0, item, 0), axis=1) >= count
-    crossed = (env.pos[:, 1] > env.cfg.river_col)[:, None]
-    return np.where(item == CROSS, crossed, have) & mask, mask
+    have = np.take_along_axis(env.inv, item, axis=1) >= count
+    return have & mask, mask
 
 
 def requirement_status_reference(env, req: Requests):
@@ -112,8 +119,5 @@ def requirement_status_reference(env, req: Requests):
         for gid in np.unique(g[g >= 0]):
             goal = GOALS[gid]
             rows = g == gid
-            if goal.item == CROSS:
-                sat[rows, j] = env.pos[rows, 1] > env.cfg.river_col
-            else:
-                sat[rows, j] = env.inv[rows, goal.item] >= goal.count
+            sat[rows, j] = env.inv[rows, goal.item] >= goal.count
     return sat, mask

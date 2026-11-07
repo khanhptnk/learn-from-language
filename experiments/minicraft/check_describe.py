@@ -25,7 +25,7 @@ from train import has_heldout  # noqa: E402
 
 from gft.minicraft.core import N_WORLD_ACTIONS, WorldConfig  # noqa: E402
 from gft.minicraft.expert import ExpertPool  # noqa: E402
-from gft.minicraft.goals import Requests, sample_requests  # noqa: E402
+from gft.minicraft.goals import sample_requests  # noqa: E402
 from gft.minicraft.learn import (CleanPolicy, cached_pool, obs_tensor, on_device, policy_actions,  # noqa: E402
                                  prompt_tokens, rng_state, run_episodes, set_rng_state, stack_steps)
 from gft.minicraft.teacher import PROFILES, compose, episode_facts  # noqa: E402

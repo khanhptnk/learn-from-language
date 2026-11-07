@@ -8,6 +8,7 @@ dependencies = [
     "matplotlib>=3.8",
     "torch>=2.14.1",
     "scipy>=1.17.1",
+    "transformers>=5.20.2",
 ]
 
 [dependency-groups]
@@ -27,3 +28,8 @@ explicit = true
 
 [tool.uv.sources]
 torch = { index = "pytorch-cpu" }
+
+[tool.pytest.ini_options]
+# tests/legacy: older learners and the tabular/theory code, not run by default (.venv/bin/python -m pytest tests/legacy)
+testpaths = ["tests"]
+norecursedirs = ["legacy", "__pycache__"]

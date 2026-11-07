@@ -26,7 +26,7 @@ if __name__ == "__main__":
     m = CleanPolicy(13).to(dev)
     env = MiniCraft(WorldConfig(), np.arange(1024))
     x, iv = obs_tensor(*snapshot(env), dev)
-    act = torch.randint(12, (1024,), device=dev)
+    act = torch.randint(7, (1024,), device=dev)
     for n_prompts in (1024, 256, 64):
         tok = torch.randint(1, 4096, (n_prompts, 70), device=dev)
         idx = torch.randint(n_prompts, (1024,), device=dev)

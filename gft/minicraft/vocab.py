@@ -6,19 +6,28 @@ tests/test_minicraft_learn.py checks that every word the teacher and the request
 """
 
 WORDS = (
-    "a", "across", "all", "along", "an", "and", "anything", "at", "because", "blocked", "bridge", "bridged",
-    "bridges", "build", "building", "built", "bumped", "but", "by", "cell", "collect", "collected", "count", "craft",
-    "crafted", "crafting", "crossed", "did", "dig", "done", "empty", "ended", "failed", "far", "feedback", "fetch",
-    "finished", "firewood", "first", "for", "from", "furnace", "gather", "gem", "gems", "get", "give", "go", "goal",
-    "gotten", "great", "ground", "had", "handle", "handles", "have", "hunting", "inputs", "into", "iron", "is", "it",
-    "item", "job", "keep", "lasted", "made", "make", "managed", "metal", "mine", "missing", "needed", "next", "no",
-    "not", "nothing", "of", "off", "okay", "on", "once", "or", "ore", "outfit", "outpost", "over", "pickaxe",
-    "pickaxes", "picked", "plank", "planks", "point", "prepare", "quite", "raw", "ready", "recipe", "request",
-    "river", "rock", "run", "should", "side", "some", "something", "standing", "station", "step", "steps", "stick",
-    "sticks", "still", "stone", "subgoal", "target", "thanks", "that", "the", "them", "there", "things", "times",
-    "to", "took", "tool", "tools", "treasure", "tree", "trees", "tried", "trying", "twice", "up", "upgrade", "use",
-    "used", "wall", "was", "wasted", "water", "way", "went", "were", "when", "where", "with", "without", "wood",
-    "work", "workbench", "workshop", "would", "wrong", "you", "your",
+    'a', 'along', 'an', 'any', 'anything', 'at', 'away', 'be', 'because', 'before',
+    'brick', 'bricks', 'build', 'bumped', 'but', 'camp', 'can', 'carried', 'clay', 'collect',
+    'collected', 'could', 'craft', 'crafted', 'crafting', 'did', 'dig', 'do', 'done', 'else',
+    'empty', 'ended', 'enough', 'failed', 'feedback', 'fence', 'fences', 'fiber', 'first', 'for',
+    'from', 'garden', 'gather', 'get', 'give', 'going', 'got', 'gotten', 'great', 'ground',
+    'had', 'harbour', 'have', 'into', 'is', 'job', 'keep', 'kiln', 'kitchen', 'lasted',
+    'loom', 'made', 'make', 'managed', 'missing', 'need', 'needed', 'never', 'next', 'no',
+    'not', 'nothing', 'of', 'off', 'okay', 'once', 'only', 'open', 'or', 'oven',
+    'ovens', 'pickaxe', 'pickaxes', 'picked', 'pit', 'plank', 'planks', 'point', 'prepare', 'pressed',
+    'quarry', 'quite', 'raft', 'rafts', 'reeds', 'request', 'rock', 'rope', 'run', 'set',
+    'should', 'site', 'sling', 'slings', 'some', 'something', 'start', 'station', 'steps', 'still',
+    'stone', 'thanks', 'that', 'the', 'there', 'things', 'this', 'time', 'times', 'to',
+    'took', 'tools', 'tree', 'tried', 'trying', 'twice', 'up', 'used', 'wall', 'walls',
+    'was', 'way', 'well', 'wells', 'went', 'with', 'without', 'wood', 'work', 'workbench',
+    'worked', 'would', 'wrong', 'you', 'your',
+    # narration (2026-10-28): places, inputs, sequence words
+    'after', 'and', 'became', 'happened', 'holding', 'it', 'later', 'nice', 'on', 'so',
+    'them', 'then', 'turned', 'using',
+    # counts and DONE (2026-11-02): "You had 1 of the 2 planks needed ...", "You never said you were done, ..."
+    'what', 'said', 'were', 'count',
+    # pace (2026-11-04): "You did make rope quicker than usual." / "..., but it took longer than usual."
+    'than', 'usual', 'quicker', 'faster', 'longer', 'slower',
 )
 NUMBERS = 256        # "0" .. "255" get their own ids after WORDS
 UNK_BUCKETS = 64     # other words: hashed into this many shared ids

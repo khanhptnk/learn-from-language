@@ -1,11 +1,8 @@
-"""Neural learners on MiniCraft: base-policy BC, Batch GFT (incremental), PPO, filtered BC.
-
-All learners share the clean policy architecture; GFT adds an auxiliary feedback-conditioned policy whose logits are
-the (detached) clean logits plus a learned feedback term -- the prior-times-likelihood form of the exact posterior.
+"""Shared MiniCraft learning code: the policy network, prompts, task pools and rollouts, the curriculum, evaluation,
+base-policy pretraining, the entropy controller and the PPO / GRPO baseline. GFT itself is gft/minicraft/gft_message.py.
 """
 
-import copy
-from collections import Counter
+from collections import Counter, OrderedDict
 import hashlib
 import math
 import pickle
@@ -20,19 +17,20 @@ import torch
 import torch.nn.functional as F_
 from torch import nn
 
-from gft.minicraft.core import (BRIDGE_ITEM, N_ACTIONS, N_CELLS, N_ITEMS, N_WORLD_ACTIONS, RECIPES, MiniCraft,
-                                WorldConfig)
+from gft.minicraft.core import (AGENT_FEATS, DONE, N_ACTIONS, N_CELLS, N_ITEMS, N_WORLD_ACTIONS, RECIPES,
+                                MiniCraft)
 from gft.minicraft.expert import ExpertPool, expert_action
-from gft.minicraft.goals import (ALIASES, CROSS, GOALS, MAX_GOALS, N_GOALS, Requests, alias_requests,
+from gft.minicraft.goals import (ALIASES, GOALS, MAX_GOALS, N_GOALS, Requests, alias_requests,
                                  requirement_status, sample_requests)
-from gft.minicraft.teacher import (achieved, claim_steps, compose, episode_facts, event_arrays, feedback,
-                                   mentions)
+from gft.minicraft.teacher import (achieved, compose, episode_facts, episode_facts_all,
+                                   feedback)
+from gft.minicraft.verify import reported_fraction
 from gft.minicraft.vocab import NUMBERS, UNK_BUCKETS, WORDS
 
 VOCAB = 4096
 MAX_TOKENS = 128
-COVERAGE_ROUNDS = 5          # window for the coverage diagnostic
-HELDOUT_FRAC = 0.1           # Stage I episodes held out each round to measure reader generalization
+SEP = "[SEP]"                # separates the request from the feedback in pi^fb's prompt (fb_sep)
+SEP_TOKEN = 2 ** 32 + 1      # its token: word tokens are 1 + crc32 <= 2**32, so it never collides
 FWD_CHUNK = 8192             # states per no-grad forward pass (train.py lowers it for pixel observations: GPU memory)
 
 
@@ -42,8 +40,13 @@ def tokenize(texts):
     vocab.WORDS."""
     out = np.zeros((len(texts), MAX_TOKENS), dtype=np.int64)
     for i, t in enumerate(texts):
-        words = re.findall(r"[a-z]+|\d+", t.lower())[:MAX_TOKENS]
-        out[i, :len(words)] = [1 + zlib.crc32(w.encode()) for w in words]
+        tok = []
+        for k, piece in enumerate(t.split(SEP)):
+            if k:
+                tok.append(SEP_TOKEN)
+            tok += [1 + zlib.crc32(w.encode()) for w in re.findall(r"[a-z]+|\d+", piece.lower())]
+        tok = tok[:MAX_TOKENS]
+        out[i, :len(tok)] = tok
     return torch.from_numpy(out)
 
 
@@ -55,9 +58,12 @@ def _exact_vocab_table():
     return tok[order], (torch.arange(len(words)) + 1)[order]
 
 
-def prompt_text(request, feedback=None):
-    """The policy's text input: the request, plus feedback for pi^fb (one prompt format for every model)."""
-    return f"request: {request}" + (f" feedback: {feedback}" if feedback is not None else "")
+def prompt_text(request, feedback=None, sep=False):
+    """The policy's text input: the request, plus feedback for pi^fb (one prompt format for every model); sep: the
+    feedback follows a dedicated separator token instead of the word "feedback"."""
+    if feedback is None:
+        return f"request: {request}"
+    return f"request: {request} {SEP} {feedback}" if sep else f"request: {request} feedback: {feedback}"
 
 
 def prompt_tokens(texts, device):
@@ -69,12 +75,14 @@ def prompt_tokens(texts, device):
 # ---------------------------------------------------------------- observations
 
 def snapshot(env):
-    """Compact per-step state: grid (B,S,S) int8, pos/face (B,3), inventory (B,N_ITEMS)."""
-    return env.grid.copy(), np.concatenate([env.pos, env.face[:, None]], 1), env.inv.copy()
+    """Compact per-step state: grid (B,S,S) int8, pos/face (B,3), agent state (B,AGENT_FEATS): the inventory (its
+    first N_ITEMS columns), the cursor and the adjacent station's slot (MiniCraft.agent_state)."""
+    return env.grid.copy(), np.concatenate([env.pos, env.face[:, None]], 1), env.agent_state()
 
 
 def obs_tensor(grid, pf, inv, device):
-    """One-hot cells + agent position + facing channels, (B, N_CELLS + 5, S, S); inventory (B, N_ITEMS)."""
+    """One-hot cells + agent position + facing channels, (B, N_CELLS + 5, S, S); log1p agent state (B, AGENT_FEATS),
+    whose first N_ITEMS columns are the inventory."""
     g = torch.as_tensor(grid, device=device).long()
     B, S, _ = g.shape
     x = F_.one_hot(g, N_CELLS).permute(0, 3, 1, 2).float()
@@ -109,12 +117,14 @@ class Encoder(nn.Module):
     enough to find paths across the map, with few parameters (value-iteration-network style)."""
 
     def __init__(self, size=None, d=128, ch=32, crop=5, layers=3, trunk=1, rec=0, text_attn=False, dt=128,
-                 pixels=False, looks=4):
+                 pixels=False, looks=4, flat=False):
         """pixels: the network sees only an RGB rendering of the state (render.render, a fixed first layer); a patch
         conv reads each cell's tile, and since the agent's position is no longer given, the agent-centred crop is
-        replaced by `looks` learned attention maps over the map."""
+        replaced by `looks` learned attention maps over the map -- or, with flat=True, by the whole feature map
+        flattened (position explicit from the first step; needs the map size)."""
         super().__init__()
         self.crop, self.rec, self.ch, self.d, self.text_attn, self.pixels = crop, rec, ch, d, text_attn, pixels
+        self.flat = flat and pixels
         in_ch = N_CELLS + 5
         if pixels:
             from gft.minicraft.render import TILE
@@ -139,9 +149,13 @@ class Encoder(nn.Module):
             for i in range(layers):
                 convs += [nn.Conv2d(in_ch if i == 0 else ch, ch, 3, padding=1), nn.ReLU()]
             self.conv = nn.Sequential(*convs)
-        self.local_fc = nn.Linear(ch * looks if pixels else ch * crop * crop, d)
+        if self.flat:
+            assert size is not None, "flat pixel features need the map size"
+            self.local_fc = nn.Linear(ch * size * size, d)
+        else:
+            self.local_fc = nn.Linear(ch * looks if pixels else ch * crop * crop, d)
         self.global_fc = nn.Linear(2 * ch, d)
-        self.inv_fc = nn.Linear(N_ITEMS, d)
+        self.inv_fc = nn.Linear(AGENT_FEATS, d)
         mlp = [nn.Linear(4 * d, d), nn.ReLU()]
         for _ in range(trunk - 1):
             mlp += [nn.Linear(d, d), nn.ReLU()]
@@ -160,6 +174,8 @@ class Encoder(nn.Module):
         return f
 
     def local(self, f, x):
+        if self.flat:                                        # the whole map, position explicit
+            return f.flatten(1)
         if self.pixels:                                      # learned attention maps instead of the agent crop
             w = F_.softmax(self.look(f).flatten(2), -1)      # (B, looks, S*S)
             return torch.einsum("bkn,bcn->bkc", w, f.flatten(2))
@@ -168,12 +184,22 @@ class Encoder(nn.Module):
     def forward(self, x, inv, p, return_f=False):
         """p: per-step prompt encoding (PromptEncoder output indexed per step): (B, d) vectors, or with text_attn
         (B, L, dt + 1) word states with a validity channel; None = no text."""
+        state, f = self.encode_state(x, inv)
+        h = self.mix(state, p)
+        return (h, f) if return_f else h
+
+    def encode_state(self, x, inv):
+        """The text-independent part (convolutions, pooling, inventory): (state (B, 3d), feature map f). Scoring one
+        state under several prompts reuses it and reruns only mix()."""
         if x.is_cuda:
             x = x.contiguous(memory_format=torch.channels_last)   # faster cuDNN convolutions; same math
         f = self.features(x)                                # (B, ch, S, S)
         h_local = self.local_fc(self.local(f, x).flatten(1))
         h_global = self.global_fc(torch.cat([f.mean((2, 3)), f.amax((2, 3))], 1))
-        state = torch.cat([F_.relu(h_local), F_.relu(h_global), F_.relu(self.inv_fc(inv))], 1)
+        return torch.cat([F_.relu(h_local), F_.relu(h_global), F_.relu(self.inv_fc(inv))], 1), f
+
+    def mix(self, state, p):
+        """The text-dependent head: state (B, 3d) and per-step prompt encodings -> trunk vector h (B, d)."""
         if p is None:
             p = state.new_zeros(len(state), self.d)
         elif self.text_attn:
@@ -187,8 +213,7 @@ class Encoder(nn.Module):
             ctx = F_.scaled_dot_product_attention(q, k, v, attn_mask=valid[:, None, None, :])   # fused kernel
             p = self.p_pool(pooled) + self.p_attn(ctx.reshape(B, dt))
         # the prompt vector enters linearly: a ReLU at exactly 0 would pass no gradient to a fresh (zero) text pathway
-        h = self.trunk(torch.cat([state, p], 1))
-        return (h, f) if return_f else h
+        return self.trunk(torch.cat([state, p], 1))
 
 
 def cell_coords(S, device):
@@ -198,34 +223,34 @@ def cell_coords(S, device):
     return torch.stack([x.flatten(), y.flatten()], 1)
 
 
-def soft_crop(f, pos, crop):
-    """(B, ch, crop, crop) bilinear crop of feature map f (B, ch, S, S) centred on normalized positions pos (B, 2);
-    zero outside the map. With pos at a cell centre this equals the integer crop around that cell."""
-    S, r = f.shape[-1], crop // 2
-    off = 2 * torch.arange(-r, r + 1, device=f.device, dtype=f.dtype) / S
-    dy, dx = torch.meshgrid(off, off, indexing="ij")
-    grid = pos[:, None, None, :] + torch.stack([dx, dy], -1)[None]
-    return F_.grid_sample(f, grid, mode="bilinear", padding_mode="zeros", align_corners=False)
+def attention_crop(f, a, crop):
+    """(B, ch * crop * crop) mixture of the crop x crop windows of f (B, ch, S, S) around every cell, weighted by an
+    attention a (B, S*S) over cells; zero outside the map. With a one-hot on the agent's cell this is the agent crop
+    (crop_at_agent); unlike cropping at the attention's mean position, every cell gets its own gradient, so a fresh
+    locator can learn where the agent is."""
+    windows = F_.unfold(f, crop, padding=crop // 2)        # (B, ch * crop * crop, S*S)
+    return torch.einsum("bn,bkn->bk", a, windows)
 
 
 class TextAttention(nn.Module):
     """Multi-head attention of queries (B, N, dq) over word states (B, L, dt) with a validity mask (B, L); output
     projection starts at zero, so a fresh text pathway adds nothing."""
 
-    def __init__(self, dq, dt, d_out, heads=4):
+    def __init__(self, dq, dt, d_out, heads=4, dk=None, zero_out=True):
         super().__init__()
         self.heads, self.dt = heads, dt
-        self.q, self.k, self.v = nn.Linear(dq, dt), nn.Linear(dt, dt), nn.Linear(dt, dt)
+        self.q, self.k, self.v = nn.Linear(dq, dt), nn.Linear(dk or dt, dt), nn.Linear(dk or dt, dt)
         self.o = nn.Linear(dt, d_out)
-        nn.init.zeros_(self.o.weight)
-        nn.init.zeros_(self.o.bias)
+        if zero_out:
+            nn.init.zeros_(self.o.weight)
+            nn.init.zeros_(self.o.bias)
 
-    def forward(self, q, words, valid):
+    def forward(self, q, words, valid=None):
         B, N, L, H = q.shape[0], q.shape[1], words.shape[1], self.heads
         q = self.q(q).view(B, N, H, -1).transpose(1, 2)
         k = self.k(words).view(B, L, H, -1).transpose(1, 2)
         v = self.v(words).view(B, L, H, -1).transpose(1, 2)
-        out = F_.scaled_dot_product_attention(q, k, v, attn_mask=valid[:, None, None, :])
+        out = F_.scaled_dot_product_attention(q, k, v, attn_mask=None if valid is None else valid[:, None, None, :])
         return self.o(out.transpose(1, 2).reshape(B, N, self.dt))
 
 
@@ -236,6 +261,68 @@ def split_prompt(p, dt):
     return words, valid, mean
 
 
+class FilmEncoder(nn.Module):
+    """The vin pixel encoder (same modules and names, so a text-free vin base loads into it) with the text conditioning
+    every layer instead of entering once at the end: the text summary scales and shifts (FiLM) the channels of the stem
+    and of every recurrent conv pass, and each trunk layer is FiLM-modulated and cross-attends to the words. All
+    conditioning starts at zero, so with a vin base loaded it starts as that base."""
+
+    def __init__(self, size=None, d=256, ch=32, rec=8, trunk=3, looks=4, dt=128, heads=4, pixels=True):
+        super().__init__()
+        assert pixels, "FilmEncoder is for pixel observations"
+        from gft.minicraft.render import TILE
+        self.d, self.ch, self.rec, self.dt = d, ch, rec, dt
+        self.patch = nn.Conv2d(3, ch, TILE, stride=TILE)
+        self.look = nn.Conv2d(ch, looks, 1)
+        self.stem = nn.Conv2d(ch, ch, 3, padding=1)
+        self.rconv = nn.Conv2d(ch, ch, 3, padding=1)
+        self.local_fc = nn.Linear(ch * looks, d)
+        self.global_fc = nn.Linear(2 * ch, d)
+        self.inv_fc = nn.Linear(AGENT_FEATS, d)
+        mlp = [nn.Linear(4 * d, d), nn.ReLU()]
+        for _ in range(trunk - 1):
+            mlp += [nn.Linear(d, d), nn.ReLU()]
+        self.trunk = nn.Sequential(*mlp)
+        self.p_pool = nn.Linear(dt, d)                                # text summary at the trunk input (as vin)
+        self.conv_film = nn.Linear(dt, (rec + 1) * 2 * ch)            # stem + every recurrent pass
+        self.trunk_film = nn.ModuleList(nn.Linear(dt, 2 * d) for _ in range(trunk))
+        self.trunk_attn = nn.ModuleList(TextAttention(d, dt, d, heads) for _ in range(trunk))
+        for m in [self.p_pool, self.conv_film, *self.trunk_film]:
+            nn.init.zeros_(m.weight)
+            nn.init.zeros_(m.bias)
+
+    def forward(self, x, inv, p, return_f=False):
+        from gft.minicraft.render import render
+        if x.is_cuda:
+            x = x.contiguous(memory_format=torch.channels_last)
+        B = x.shape[0]
+        if p is None:
+            words, valid, mean = None, None, x.new_zeros(B, self.dt)
+        else:
+            words, valid, mean = split_prompt(p, self.dt)
+        film = self.conv_film(mean).view(B, self.rec + 1, 2, self.ch, 1, 1)
+        u = self.stem(F_.relu(self.patch(render(x))))
+        u = u * (1 + film[:, 0, 0]) + film[:, 0, 1]
+        f = F_.relu(u)
+        for k in range(self.rec):
+            f = F_.relu((self.rconv(f) + u) * (1 + film[:, k + 1, 0]) + film[:, k + 1, 1])
+        w = F_.softmax(self.look(f).flatten(2), -1)
+        local = torch.einsum("bkn,bcn->bkc", w, f.flatten(2)).flatten(1)
+        state = torch.cat([F_.relu(self.local_fc(local)), F_.relu(self.global_fc(torch.cat([f.mean((2, 3)),
+                                                                                          f.amax((2, 3))], 1))),
+                           F_.relu(self.inv_fc(inv))], 1)
+        h = torch.cat([state, self.p_pool(mean)], 1)
+        layers = [m for m in self.trunk if isinstance(m, nn.Linear)]
+        for k, lin in enumerate(layers):
+            h = lin(h)
+            g, b = self.trunk_film[k](mean).chunk(2, 1)
+            h = h * (1 + g) + b
+            if words is not None:
+                h = h + self.trunk_attn[k](h[:, None], words, valid)[:, 0]
+            h = F_.relu(h)
+        return (h, f) if return_f else h
+
+
 class GroundedEncoder(nn.Module):
     """Candidate A (docs/architecture_design.md): text acts early and spatially, planning keeps the value-iteration
     prior, and the agent's surroundings are read egocentrically from pixels.
@@ -244,12 +331,12 @@ class GroundedEncoder(nn.Module):
     2. grounding: every cell attends over the prompt's words (cell -> text) and is FiLM-modulated by the text summary
        and the inventory -- the text marks which cells matter before planning.
     3. planning: a stem conv over [cells, coordinates], then one shared 3x3 conv applied `rec` times (stem re-injected).
-    4. locate: a text-free attention map finds the agent (it is drawn distinctly); a crop x crop window of the planning
-       features is read around it (bilinear) plus the features at the agent.
+    4. locate: a text-free attention map over cells finds the agent (it is drawn distinctly); the crop x crop windows
+       of (channel-reduced) planning features around each cell are mixed by that attention, plus the features at it.
     5. decide: the state attends over the words again (what does the message say about now), then an MLP trunk.
     Every text projection starts at zero: with a fresh text pathway the network equals its text-free version."""
 
-    def __init__(self, size=None, d=256, ch=64, dt=128, rec=8, trunk=3, crop=7, heads=4, pixels=True):
+    def __init__(self, size=None, d=256, ch=64, dt=128, rec=8, trunk=3, crop=7, heads=4, crop_ch=16, pixels=True):
         super().__init__()
         self.d, self.ch, self.dt, self.rec, self.crop, self.pixels = d, ch, dt, rec, crop, pixels
         if pixels:
@@ -258,7 +345,7 @@ class GroundedEncoder(nn.Module):
         else:
             self.patch = nn.Conv2d(N_CELLS + 5, ch, 1)
         self.cell = nn.Conv2d(ch, ch, 1)
-        self.inv_fc = nn.Linear(N_ITEMS, d)
+        self.inv_fc = nn.Linear(AGENT_FEATS, d)
         self.ground = TextAttention(ch, dt, ch, heads)
         self.film = nn.Linear(dt + d, 2 * ch)
         nn.init.zeros_(self.film.weight)
@@ -266,7 +353,8 @@ class GroundedEncoder(nn.Module):
         self.stem = nn.Conv2d(ch + 2, ch, 3, padding=1)
         self.rconv = nn.Conv2d(ch, ch, 3, padding=1)
         self.locate = nn.Conv2d(ch, 1, 1)
-        self.local_fc = nn.Linear(ch * crop * crop + ch, d)
+        self.crop_proj = nn.Conv2d(ch, crop_ch, 1)          # fewer channels: every cell's window is materialized
+        self.local_fc = nn.Linear(crop_ch * crop * crop + ch, d)
         self.global_fc = nn.Linear(2 * ch, d)
         self.read = TextAttention(3 * d, dt, d, heads)
         self.p_pool = nn.Linear(dt, d)
@@ -301,9 +389,8 @@ class GroundedEncoder(nn.Module):
         for _ in range(self.rec):
             f = F_.relu(self.rconv(f) + u)
         a = F_.softmax(self.locate(c0).flatten(1).float(), -1).to(f.dtype)    # (B, S*S) where the agent is
-        pos = a @ coords.to(f.dtype)                                         # (B, 2)
         at = torch.einsum("bn,bcn->bc", a, f.flatten(2))
-        h_local = self.local_fc(torch.cat([soft_crop(f, pos, self.crop).flatten(1), at], 1))
+        h_local = self.local_fc(torch.cat([attention_crop(self.crop_proj(f), a, self.crop), at], 1))
         h_global = self.global_fc(torch.cat([f.mean((2, 3)), f.amax((2, 3))], 1))
         state = torch.cat([F_.relu(h_local), F_.relu(h_global), iv], 1)
         if words is None:
@@ -344,19 +431,23 @@ class FusionEncoder(nn.Module):
     absolute coordinates and of the coordinates relative to the located agent). Each block cross-attends to the words
     through a zero-initialized gate, then self-attends. The policy reads the [ACT] token."""
 
-    def __init__(self, size=None, d=256, w=128, dt=128, layers=4, heads=4, pre_conv=2, freqs=4, pixels=True):
+    def __init__(self, size=None, d=256, w=128, dt=128, layers=4, heads=4, pre_conv=2, freqs=4, pixels=True, rec=0):
+        """rec=K: after the pre-convs, one shared 3x3 conv applied K times with the input re-injected (the VIN-style
+        recurrence of Encoder), so path information travels K cells before the tokens meet the words."""
         super().__init__()
-        self.d, self.w, self.dt, self.pixels = d, w, dt, pixels
+        self.d, self.w, self.dt, self.pixels, self.rec = d, w, dt, pixels, rec
         if pixels:
             from gft.minicraft.render import TILE
             self.patch = nn.Conv2d(3, w, TILE, stride=TILE)
         else:
             self.patch = nn.Conv2d(N_CELLS + 5, w, 1)
         self.convs = nn.ModuleList(nn.Conv2d(w, w, 3, padding=1) for _ in range(pre_conv))
+        if rec:
+            self.rconv = nn.Conv2d(w, w, 3, padding=1)
         self.locate = nn.Conv2d(w, 1, 1)
         self.register_buffer("freqs", math.pi * 2.0 ** torch.arange(freqs), persistent=False)
         self.pos = nn.Linear(8 * freqs, w)
-        self.inv_tok = nn.Linear(N_ITEMS, w)
+        self.inv_tok = nn.Linear(AGENT_FEATS, w)
         self.act_tok = nn.Parameter(torch.zeros(1, 1, w))
         self.blocks = nn.ModuleList(FusionBlock(w, dt, heads) for _ in range(layers))
         self.ln = nn.LayerNorm(w)
@@ -371,18 +462,79 @@ class FusionEncoder(nn.Module):
         c = F_.relu(self.patch(x))
         for conv in self.convs:
             c = F_.relu(conv(c) + c)
+        if self.rec:
+            u = c
+            for _ in range(self.rec):
+                c = F_.relu(self.rconv(c) + u)
         B, _, S, _ = c.shape
         coords = cell_coords(S, c.device).to(c.dtype)                        # (S*S, 2)
-        a = F_.softmax(self.locate(c).flatten(1).float(), -1).to(c.dtype)
-        rel = coords[None] - (a @ coords)[:, None]                           # (B, S*S, 2) relative to the agent
-        xy = torch.cat([coords[None].expand(B, -1, -1), rel], -1)[..., None] * self.freqs.to(c.dtype)
-        cells = c.flatten(2).transpose(1, 2) + self.pos(torch.cat([xy.sin(), xy.cos()], -1).flatten(2))
+        a = F_.softmax(self.locate(c).flatten(1).float(), -1).to(c.dtype)    # (B, S*S) where the agent is
+        w = coords[..., None] * self.freqs.to(c.dtype)                       # (S*S, 2, freqs)
+        sn, cs = w.sin().flatten(1), w.cos().flatten(1)                      # absolute Fourier features
+        # relative to the agent, averaged over the locator's attention: sin(u - v) = sin u cos v - cos u sin v, so the
+        # expectation needs only the attention-weighted absolute features (exact when the attention is one-hot)
+        ea_s, ea_c = a @ sn, a @ cs                                          # (B, 2 * freqs)
+        rel_s = sn[None] * ea_c[:, None] - cs[None] * ea_s[:, None]
+        rel_c = cs[None] * ea_c[:, None] + sn[None] * ea_s[:, None]
+        feats = torch.cat([sn[None].expand(B, -1, -1), cs[None].expand(B, -1, -1), rel_s, rel_c], -1)
+        cells = c.flatten(2).transpose(1, 2) + self.pos(feats)
         t = torch.cat([self.act_tok.expand(B, -1, -1).to(c.dtype), self.inv_tok(inv)[:, None], cells], 1)
         words, valid = (None, None) if p is None else split_prompt(p, self.dt)[:2]
         for blk in self.blocks:
             t = blk(t, words, valid)
         h = self.out(self.ln(t[:, 0]))
         return (h, t[:, 2:].transpose(1, 2).reshape(B, self.w, S, S)) if return_f else h
+
+
+def split_sentences(text):
+    """Feedback text -> its sentences ("You did not get some metal. Great job!" -> 2)."""
+    return [x.strip() for x in re.findall(r"[^.!?]+[.!?]?", text) if x.strip()] or [text]
+
+
+SENT_TOKENS = 32                  # subword tokens kept per sentence by the pretrained text encoder
+
+
+class HFTextEncoder:
+    """Frozen pretrained text encoder (Hugging Face; default BAAI/bge-small-en-v1.5): texts -> per-token contextual
+    states (n, SENT_TOKENS, D) and a validity mask (n, SENT_TOKENS). Weights load from safetensors only."""
+
+    def __init__(self, name, device, max_length=SENT_TOKENS):
+        from transformers import AutoModel, AutoTokenizer
+        self.max_length = max_length
+        self.tok = AutoTokenizer.from_pretrained(name)
+        self.model = AutoModel.from_pretrained(name, use_safetensors=True).to(device).eval()
+        for q in self.model.parameters():
+            q.requires_grad_(False)
+        self.dim, self.device = self.model.config.hidden_size, device
+
+    @torch.no_grad()
+    def __call__(self, texts):
+        enc = self.tok(texts, padding="max_length", truncation=True, max_length=self.max_length, return_tensors="pt")
+        enc = {k: v.to(self.device) for k, v in enc.items()}
+        return self.model(**enc).last_hidden_state.float(), enc["attention_mask"].bool()
+
+
+class HashTextEncoder:
+    """Stand-in for tests (no download): each word -> a fixed random vector seeded by its crc32, plus a leading
+    sentence token; the same interface as HFTextEncoder."""
+
+    def __init__(self, dim=16, device="cpu", max_length=SENT_TOKENS):
+        self.dim, self.device, self.max_length = dim, device, max_length
+
+    def __call__(self, texts):
+        out = torch.zeros(len(texts), self.max_length, self.dim)
+        mask = torch.zeros(len(texts), self.max_length, dtype=torch.bool)
+        for i, t in enumerate(texts):
+            words = ["<s>"] + re.findall(r"[a-z]+|\d+", t.lower())[: self.max_length - 1]
+            for j, w in enumerate(words):
+                out[i, j] = torch.randn(self.dim, generator=torch.Generator().manual_seed(zlib.crc32(w.encode())))
+            mask[i, :len(words)] = True
+        return out.to(self.device), mask.to(self.device)
+
+
+def make_text_encoder(name, device, max_length=SENT_TOKENS):
+    return HashTextEncoder(device=device, max_length=max_length) if name == "hash" else \
+        HFTextEncoder(name, device, max_length)
 
 
 class PromptEncoder(nn.Module):
@@ -394,34 +546,50 @@ class PromptEncoder(nn.Module):
     themselves + validity, (B, L, dt + 8), for encoders with their own text projections. exact: embed words by their
     vocab.WORDS id (no collisions) instead of VOCAB hashed buckets (legacy; kept so old checkpoints load unchanged)."""
 
-    def __init__(self, d, dt=128, layers=2, packed=False, states=False, exact=False):
+    def __init__(self, d, dt=128, layers=2, packed=False, states=False, exact=False, dropout=0.0, sep=False):
         super().__init__()
-        self.packed, self.states, self.exact = packed, states, exact
+        self.packed, self.states, self.exact, self.sep = packed, states, exact, sep
         if exact:
             known, ids = _exact_vocab_table()
             self.register_buffer("known", known, persistent=False)
             self.register_buffer("known_ids", ids, persistent=False)
-            self.tok = nn.Embedding(len(known) + 1 + UNK_BUCKETS, dt, padding_idx=0)
+            self.tok = nn.Embedding(len(known) + 1 + UNK_BUCKETS + sep, dt, padding_idx=0)
         else:
-            self.tok = nn.Embedding(VOCAB, dt, padding_idx=0)
+            self.tok = nn.Embedding(VOCAB + sep, dt, padding_idx=0)   # sep: one extra row for the separator
         if packed:
             self.kv = nn.Linear(dt, 2 * dt)
         self.pos = nn.Embedding(MAX_TOKENS, dt)
-        layer = nn.TransformerEncoderLayer(dt, 4, 2 * dt, dropout=0.0, batch_first=True, norm_first=True)
+        layer = nn.TransformerEncoderLayer(dt, 4, 2 * dt, dropout=dropout, batch_first=True, norm_first=True)
         self.text = nn.TransformerEncoder(layer, layers, enable_nested_tensor=False)
         self.out = nn.Linear(dt, d)
         nn.init.zeros_(self.out.weight)
         nn.init.zeros_(self.out.bias)
 
+    def _load_from_state_dict(self, state_dict, prefix, *args, **kwargs):
+        """Exact checkpoints from before words were appended to vocab.WORDS: their rows for the old words, the numbers,
+        the unknown buckets and the separator are kept, and the new words get this model's fresh rows in between
+        (rows are [padding, words, numbers, buckets, separator], so appending words shifts everything after them)."""
+        key = prefix + "tok.weight"
+        if self.exact and key in state_dict and state_dict[key].shape[0] < self.tok.weight.shape[0]:
+            old, new = state_dict[key], self.tok.weight.detach()
+            n_new = new.shape[0] - old.shape[0]                  # words appended since
+            split = 1 + len(WORDS) - n_new                       # padding + the old words
+            state_dict[key] = torch.cat([old[:split], new[split:split + n_new].to(old), old[split:]])
+        super()._load_from_state_dict(state_dict, prefix, *args, **kwargs)
+
     def ids(self, tokens):
         """Embedding rows of word tokens (see tokenize); 0 stays padding."""
         if not self.exact:
-            return torch.where(tokens > 0, 1 + (tokens - 1) % (VOCAB - 1), tokens)
-        tokens = tokens.contiguous()
-        i = torch.searchsorted(self.known, tokens).clamp(max=len(self.known) - 1)
-        hit = self.known[i] == tokens
-        unk = len(self.known) + 1 + tokens % UNK_BUCKETS
-        return torch.where(tokens > 0, torch.where(hit, self.known_ids[i], unk), tokens)
+            out = torch.where(tokens > 0, 1 + (tokens - 1) % (VOCAB - 1), tokens)
+        else:
+            tokens = tokens.contiguous()
+            i = torch.searchsorted(self.known, tokens).clamp(max=len(self.known) - 1)
+            hit = self.known[i] == tokens
+            unk = len(self.known) + 1 + tokens % UNK_BUCKETS
+            out = torch.where(tokens > 0, torch.where(hit, self.known_ids[i], unk), tokens)
+        if self.sep:                                  # the separator has its own (last) row
+            out = torch.where(tokens == SEP_TOKEN, self.tok.num_embeddings - 1, out)
+        return out
 
     def forward(self, tokens):
         pad = tokens == 0
@@ -434,6 +602,64 @@ class PromptEncoder(nn.Module):
         return self.out((h * valid).sum(1) / valid.sum(1).clamp(min=1))
 
 
+PROMPT_TOKENS = 128               # subword tokens kept per prompt (request [SEP] feedback) by a pretrained encoder
+
+
+class PretrainedPromptEncoder(nn.Module):
+    """PromptEncoder's interface on top of a frozen pretrained text encoder (e.g. bge-small): the whole prompt text
+    (request, or request [SEP] feedback) -> contextual subword states -> a trainable adapter (LayerNorm + projection +
+    one transformer layer) -> per-token keys/values for the policy's cross-attention (packed), or a pooled vector.
+    The pretrained states carry word meaning and context ("not done" vs "done") from the start; only the adapter and
+    the policy learn. The frozen encoder is not a submodule (not saved, not trained); its outputs are cached per text
+    (LRU), since the same prompts recur across acting and training."""
+
+    def __init__(self, d, dt=128, packed=False, text_model="BAAI/bge-small-en-v1.5", dropout=0.0, cache=4096):
+        super().__init__()
+        self.packed, self.text_model, self.cache_size = packed, text_model, cache
+        dim = 16 if text_model == "hash" else 384
+        self.adapt = nn.Sequential(nn.LayerNorm(dim), nn.Linear(dim, dt))
+        layer = nn.TransformerEncoderLayer(dt, 4, 2 * dt, dropout=dropout, batch_first=True, norm_first=True)
+        self.text = nn.TransformerEncoder(layer, 1, enable_nested_tensor=False)
+        if packed:
+            self.kv = nn.Linear(dt, 2 * dt)
+        self.out = nn.Linear(dt, d)
+        nn.init.zeros_(self.out.weight)
+        nn.init.zeros_(self.out.bias)
+        self.__dict__["_enc"], self.__dict__["_cache"] = None, OrderedDict()
+
+    def frozen_states(self, texts):
+        """Cached frozen states (n, L, dim) fp16 and masks (n, L) for a list of texts."""
+        dev = self.out.weight.device
+        if self._enc is None or self._enc.device != dev:
+            self.__dict__["_enc"] = make_text_encoder(self.text_model, dev, PROMPT_TOKENS)
+            self._cache.clear()
+        new = [t for t in dict.fromkeys(texts) if t not in self._cache]
+        for j in range(0, len(new), 256):
+            st, m = self._enc(new[j:j + 256])
+            L = int(m.sum(1).max()) or 1
+            for t, a, b in zip(new[j:j + 256], st[:, :L].to(dev, torch.float16), m[:, :L].to(dev)):
+                self._cache[t] = (a, b)
+        for t in texts:
+            self._cache.move_to_end(t)
+        rows = [self._cache[t] for t in texts]
+        while len(self._cache) > max(self.cache_size, len(set(texts))):
+            self._cache.popitem(last=False)
+        L = max(len(a) for a, _ in rows)
+        states = torch.zeros(len(texts), L, rows[0][0].shape[-1], dtype=torch.float16, device=dev)
+        mask = torch.zeros(len(texts), L, dtype=torch.bool, device=dev)
+        for i, (a, b) in enumerate(rows):
+            states[i, :len(a)], mask[i, :len(b)] = a, b
+        return states, mask
+
+    def forward(self, texts):
+        states, valid_b = self.frozen_states(list(texts))
+        h = self.text(self.adapt(states.float()), src_key_padding_mask=~valid_b)
+        valid = valid_b.float().unsqueeze(-1)
+        if self.packed:
+            return torch.cat([self.kv(h) * valid, valid.expand(-1, -1, 8)], -1)
+        return self.out((h * valid).sum(1) / valid.sum(1).clamp(min=1))
+
+
 # Policy network chosen by the architecture study (check_bc.py / check_dagger.py, 2026-10-22): 8 shared conv passes,
 # width 256, 3-layer trunk. Best sample efficiency under DAgger at about equal compute.
 # text_attn: the policy attends over the prompt's words (added 2026-10-22; requests and feedback are read per state).
@@ -442,7 +668,8 @@ POLICY_ARCH = dict(d=256, rec=8, trunk=3, text_attn=True)
 # vision-language transformer (B). Both use the exact-vocabulary text encoder.
 ARCHS = {"vin": POLICY_ARCH,
          "gvin": dict(d=256, ch=64, rec=8, trunk=3, crop=7),
-         "fusion": dict(d=256, w=128, layers=4, pre_conv=2)}
+         "fusion": dict(d=256, w=128, layers=4, pre_conv=2),
+         "film": dict(d=256, ch=32, rec=8, trunk=3)}
 
 
 class CleanPolicy(nn.Module):
@@ -451,23 +678,38 @@ class CleanPolicy(nn.Module):
 
     Prompts are encoded once per episode (encode_prompt) and the vectors indexed per step."""
 
-    def __init__(self, size, dt=128, **arch):
+    def __init__(self, size, dt=128, sep=False, text_model=None, **arch):
+        """text_model: read prompts with a frozen pretrained encoder (PretrainedPromptEncoder; encode_prompt then takes
+        the prompt texts) instead of word embeddings trained from scratch (token ids)."""
         super().__init__()
         kind = arch.pop("kind", "vin")
+        exact_text = arch.pop("exact_text", False)    # words by exact vocab id (no hashed-bucket collisions)
         arch = {**ARCHS[kind], **arch}
         d = arch.pop("d")
-        self.d, self.kind = d, kind
-        if kind == "vin":
-            self.prompt = PromptEncoder(d, dt, packed=arch.get("text_attn", False))
+        self.d, self.kind, self.text_model = d, kind, text_model
+        if kind == "vin" and text_model:
+            self.prompt = PretrainedPromptEncoder(d, dt, packed=arch.get("text_attn", False), text_model=text_model)
+            self.enc = Encoder(size, d, dt=dt, **arch)
+        elif kind == "vin":
+            self.prompt = PromptEncoder(d, dt, packed=arch.get("text_attn", False), sep=sep, exact=exact_text)
             self.enc = Encoder(size, d, dt=dt, **arch)
         else:
-            self.prompt = PromptEncoder(d, dt, states=True, exact=True)
-            self.enc = {"gvin": GroundedEncoder, "fusion": FusionEncoder}[kind](size, d, dt=dt, **arch)
+            self.prompt = PromptEncoder(d, dt, states=True, exact=True, sep=sep)
+            self.enc = {"gvin": GroundedEncoder, "fusion": FusionEncoder, "film": FilmEncoder}[kind](size, d, dt=dt,
+                                                                                                     **arch)
         self.pi = nn.Linear(d, N_ACTIONS)
         self.v = nn.Linear(d, 1)
 
     def encode_prompt(self, tokens):
         return self.prompt(tokens)
+
+    def state(self, x, inv):
+        """Text-independent state encoding (default VIN encoder only), reused across prompts by head()."""
+        return self.enc.encode_state(x, inv)[0]
+
+    def head(self, state, p):
+        """Action logits of state encodings under per-step prompt encodings p."""
+        return self.pi(self.enc.mix(state, p))
 
     def forward(self, x, inv, p, return_h=False):
         h, f = self.enc(x, inv, p, return_f=True)
@@ -500,27 +742,24 @@ class CurriculumConfig:
     mode: str = "gate"           # gate: unlock the next goal on success (above); blocks: fixed schedule below;
                                  # graph: a goal opens once all its prerequisite goals (GOAL_PREREQS) are mastered
     mastery: float = 0.7         # graph: recent success a goal needs to count as mastered
+    review: float = 0.0          # graph: a mastered goal whose recent success falls below this is sampled as a
+                                 # frontier goal again (it stays mastered: nothing it unlocked is locked); 0 = off
+    confirm: bool = False        # graph: mastered needs `mastery` on two disjoint recent windows (the last two `window`s
+                                 # of outcomes, or two halves of what there is), not one window
     block_size: int = 2          # blocks: goals introduced together, in depth order
     block_budget: int = 10_000   # blocks: feedbacks (GFT teacher messages / PPO rewards) per block before the next one
 
 
 def goal_prerequisites():
-    """{goal: set of goals whose item the expert's plan for it produces (or crossing, for the river goal)} --
-    the goals that must be achievable before it."""
+    """{goal: set of goals whose item the expert's plan for it produces} -- the goals that must be achievable before
+    it."""
     from gft.minicraft.expert import RAW, plan
     out = {}
     for g in range(N_GOALS):
-        items, crossed = set(), False
-        for op in plan(np.zeros(N_ITEMS, int), [g], False, False):
-            if op[0] == "craft":
-                items.add(RECIPES[op[1]].output)
-            elif op[0] == "collect":
-                items.add(next(i for i, (c, _) in RAW.items() if c == op[1]))
-            elif op[0] == "bridge":
-                items.add(BRIDGE_ITEM)
-            crossed |= op[0] == "cross"
-        out[g] = {h for h, o in enumerate(GOALS)
-                  if h != g and ((o.item == CROSS and crossed) or (o.item != CROSS and o.item in items))}
+        items = set()
+        for op in plan(np.zeros(N_ITEMS, int), [g]):
+            items.add(RECIPES[op[1]].output if op[0] == "craft" else next(i for i, (c, _) in RAW.items() if c == op[1]))
+        out[g] = {h for h, o in enumerate(GOALS) if h != g and o.item in items}
     return out
 
 
@@ -551,12 +790,19 @@ class Curriculum:
     def _trainable(self):
         return self.mastered | self._open()
 
+    def _regressed(self):
+        return {g for g in self.mastered if len(self.hist[g]) >= self.c.min_count     # the recent window only
+                and np.mean(self.hist[g][-self.c.window:]) < self.c.review}
+
     def _graph_sample(self, rng, n):
-        trainable, open_ = self._trainable(), self._open()
+        trainable, open_ = self._trainable(), self._open() | self._regressed()
         g = self.pool_goals
         ok_mask = np.all((g < 0) | np.isin(g, list(trainable)), axis=1)
         frontier = np.nonzero(ok_mask & np.isin(g, list(open_)).any(1))[0]
         ok = np.nonzero(ok_mask)[0]
+        if len(ok) == 0:                      # a small pool may have no task made only of trainable goals
+            ok = np.nonzero(np.isin(g, list(trainable)).any(1))[0]
+            ok = ok if len(ok) else np.arange(len(g))
         if len(frontier) == 0:
             return rng.choice(ok, size=n)
         use = rng.random(n) < self.c.frontier_frac
@@ -576,14 +822,21 @@ class Curriculum:
     def update(self, goals, sat, mask, episodes, feedbacks=None):
         """Record requirement outcomes; advance the curriculum. `feedbacks` (teacher messages for GFT, rewards for
         PPO) drives the block schedule, so both methods get the same feedback budget per block."""
+        keep_n = self.c.window * (2 if self.c.confirm else 1)
         for g, ok in zip(goals[mask], sat[mask]):
             h = self.hist[int(g)]
             h.append(bool(ok))
-            del h[: max(0, len(h) - self.c.window)]
+            del h[: max(0, len(h) - keep_n)]
         if self.graph:
             for g in sorted(self._open()):
                 h = self.hist[g]
-                if len(h) >= self.c.min_count and np.mean(h) >= self.c.mastery:
+                if self.c.confirm:                    # two disjoint windows, both at mastery
+                    half = min(self.c.window, len(h) // 2)
+                    learned = half >= self.c.min_count and np.mean(h[-half:]) >= self.c.mastery and \
+                        np.mean(h[-2 * half:-half]) >= self.c.mastery
+                else:
+                    learned = len(h) >= self.c.min_count and np.mean(h) >= self.c.mastery
+                if learned:
                     self.mastered.add(g)
                     self.unlock_log.append((feedbacks if feedbacks is not None else episodes, g))
             self.unlocked = len(self._trainable())
@@ -613,12 +866,10 @@ class Curriculum:
 def claim_type(c):
     """A claim with episode-specific numbers removed, e.g. ('collected', wood, 5) -> ('collected', wood)."""
     kind = c[0]
-    if kind in ("collected", "crafted", "station_fail", "use_fail", "goal_done", "goal_not_done", "subgoal", "needed",
-                "hint_recipe", "hint_raw"):
+    if kind in ("collected", "crafted", "nothing_fail", "use_fail", "goal_done", "goal_not_done", "subgoal", "needed",
+                "hint_recipe", "hint_raw", "short", "no_done", "pace_quick", "pace_usual", "pace_slow"):
         return c[:2]
-    if kind == "missing_fail":
-        return c[:3]
-    return (kind,)
+    return (kind,)                                  # station_fail, steps, eval_count ...: only their numbers differ
 
 
 # ---------------------------------------------------------------- tasks and rollouts
@@ -669,6 +920,10 @@ def run_episodes(cfg, req, act_fn, record=True):
         valid.append(live.copy())
         log.append(env.step(a))
     sat, mask = requirement_status(env, req)
+    if cfg.success_needs_done and acts:               # met = holds at the end and the agent said done
+        A, V = np.array(acts).T, np.array(valid).T
+        last = np.where(V.any(1), V.shape[1] - 1 - np.argmax(V[:, ::-1], 1), 0)
+        sat = sat & (V.any(1) & (A[np.arange(len(A)), last] == DONE))[:, None]
     return env, log, snaps, np.array(acts).T if acts else np.zeros((len(req), 0), int), \
         np.array(valid).T if valid else np.zeros((len(req), 0), bool), sat, mask
 
@@ -677,7 +932,8 @@ def cached_pool(cfg, n, seed, tag="", cache_dir="outputs/minicraft/pools", **kw)
     """build_pool, cached on disk. Key: cfg, n, seed, `tag` (names any filter) and non-callable kwargs -- function
     objects are excluded because their repr differs between processes."""
     stable = sorted((k, repr(v)) for k, v in kw.items() if not callable(v))
-    key = hashlib.sha1(repr((cfg, n, seed, tag, stable)).encode()).hexdigest()[:16]
+    goal_list = tuple(g.phrase for g in GOALS)                   # a changed goal list changes every request
+    key = hashlib.sha1(repr((cfg, n, seed, tag, stable, goal_list)).encode()).hexdigest()[:16]
     path = Path(cache_dir) / f"pool_{key}.pkl"
     if path.exists():
         return pickle.loads(path.read_bytes())
@@ -785,17 +1041,19 @@ class GoalPrompts:
         return model.encode_prompt(self.tok[r])[inverse]
 
 
-def request_prompts(model, req, device, feedback=None):
+def request_prompts(model, req, device, feedback=None, sep=False):
     """Prompt vectors (B, d) for a batch of requests (optionally with one feedback text each), without gradients."""
-    texts = [prompt_text(req.text(b), None if feedback is None else feedback[b]) for b in range(len(req))]
+    texts = [prompt_text(req.text(b), None if feedback is None else feedback[b], sep) for b in range(len(req))]
     with torch.no_grad():
-        return model.encode_prompt(prompt_tokens(texts, device))
+        return model.encode_prompt(texts if getattr(model, "text_model", None) else prompt_tokens(texts, device))
 
 
-def policy_actions(model, env, req, device, rng, greedy=False, prompt=None, temperature=1.0):
-    """Actions for all worlds; `prompt` = per-episode prompt vectors (default: the requests alone)."""
-    x, inv = obs_tensor(env.grid, np.concatenate([env.pos, env.face[:, None]], 1), env.inv, device)
-    prompt = request_prompts(model, req, device) if prompt is None else prompt
+def policy_actions(model, env, req, device, rng, greedy=False, prompt=None, temperature=1.0, text_free=False):
+    """Actions for all worlds; `prompt` = per-episode prompt vectors (default: the requests alone); text_free: no text
+    input at all (the text-free base)."""
+    x, inv = obs_tensor(env.grid, np.concatenate([env.pos, env.face[:, None]], 1), env.agent_state(), device)
+    if not text_free:
+        prompt = request_prompts(model, req, device) if prompt is None else prompt
     with torch.inference_mode():
         logits, _ = model(x, inv, prompt)
         if greedy:
@@ -824,14 +1082,18 @@ def stack_steps(snaps, acts, valid):
 
 # ---------------------------------------------------------------- evaluation
 
-def evaluate(model, cfg, req, device, greedy=False, seed=0, detail=False):
+def evaluate(model, cfg, req, device, greedy=False, seed=0, detail=False, feedback=None, sep=False):
     """Success rate (all requirements) and fraction of requirements met; with detail=True also per-episode success,
-    per-goal success rates and mean episode length."""
+    per-goal success rates and mean episode length. feedback: one text per request added to the prompt (a policy
+    conditioned on feedback, e.g. the ideal feedback for single-model GFT)."""
     rng = np.random.default_rng(seed)
     model.eval()
-    prompt = request_prompts(model, req, device)
+    prompt = request_prompts(model, req, device, feedback=feedback, sep=sep)
+    saved = rng_state()                       # sampling draws from the torch RNG: seed it, and leave training's as is
+    torch.manual_seed(seed)
     env, _, _, _, _, sat, mask = run_episodes(
         cfg, req, lambda e, t: policy_actions(model, e, req, device, rng, greedy, prompt=prompt), record=False)
+    set_rng_state(saved)
     model.train()
     ok = (sat | ~mask).all(1)
     succ, frac = float(ok.mean()), float((sat & mask).sum() / mask.sum())
@@ -874,7 +1136,7 @@ def behaviour_goals(goals, behaviour, rng, q=0.3, combo_filter=None):
 def pretrain_base(cfg, device, n_episodes=2000, goal_pool=(0, 1, 2, 3), noise=0.1, steps=2000, batch=512, seed=0,
                   size=None, behaviour="request", q=0.3, combo_filter=None, workers=None, text=False, feedback_frac=0.5,
                   arch=None,
-                  profiles=("mixed", "reporter", "diagnoser", "coach", "grader")):
+                  profiles=("mixed", "reporter", "diagnoser", "coach", "grader"), on_loss=None):
     """BC on (slightly noisy) expert runs. The demonstrator executes the plan for behaviour_goals(request); the
     episode ends when that plan's goals are met.
 
@@ -882,7 +1144,8 @@ def pretrain_base(cfg, device, n_episodes=2000, goal_pool=(0, 1, 2, 3), noise=0.
     with PromptEncoder's zero-initialized projection, maps every prompt to 0 until training starts) -- skills without
     any text meaning, and a text pathway that can still learn. text=True: the prompt is the request, plus for a share
     `feedback_frac` of episodes a teacher message about a *different* episode; the network then learns to ignore
-    text altogether (measured: action distributions independent of the prompt), which blocks later learning."""
+    text altogether (measured: action distributions independent of the prompt), which blocks later learning.
+    on_loss: called as on_loss(step, mean loss of the last 500 steps) every 500 steps."""
     rng = np.random.default_rng(seed)
     req = sample_requests(rng, n_episodes, rng.integers(0, 2 ** 31, size=n_episodes),
                           goal_pool=None if goal_pool is None else list(goal_pool), combo_filter=combo_filter)
@@ -907,7 +1170,8 @@ def pretrain_base(cfg, device, n_episodes=2000, goal_pool=(0, 1, 2, 3), noise=0.
     opt = torch.optim.Adam(model.parameters(), lr=1e-3)
     b_t = torch.as_tensor(b, device=device)
     a = torch.as_tensor(a, device=device)
-    for _ in range(steps):
+    recent = []
+    for step in range(steps):
         i = rng.integers(len(a), size=batch)
         x, iv = obs_tensor(grid[i], pf[i], inv[i], device)
         if text:
@@ -920,10 +1184,210 @@ def pretrain_base(cfg, device, n_episodes=2000, goal_pool=(0, 1, 2, 3), noise=0.
         opt.zero_grad()
         loss.backward()
         opt.step()
+        if on_loss is not None:
+            recent.append(loss.detach())
+            if (step + 1) % 500 == 0:
+                on_loss(step + 1, float(torch.stack(recent).mean()))
+                recent = []
     return model
 
 
-# ---------------------------------------------------------------- GFT (Batch GFT, incremental)
+LANG_LEVELS = (0.5, 0.7, 0.9)   # demonstrator skill: competent but noisy; mostly-random episodes drown the BC signal
+
+
+def lang_corpus(cfg, n_episodes, heldout, seed=0, levels=LANG_LEVELS, q=0.5, chunk=512, workers=None,
+                profile="realistic"):
+    """Pretraining corpus with grounded text: noisy-expert episodes, each with the request R it was given and the
+    teacher's message about R, plus a hindsight request (the goals its demonstrator was executing, when it met them all
+    and pressed DONE). Requests may contain the held-out goals; behaviour never does, and an episode that reaches a
+    held-out goal anyway (random actions) is dropped -- their words are seen, the tasks are never done.
+
+    Behaviour: with probability q the request with each held-out goal replaced by a random other goal, else an
+    independent request over the other goals. Skill: expert action w.p. p ~ levels per episode, else a random world
+    action. Returns per-step arrays (grid, pf, inv, action, episode index), per-episode request / message /
+    hindsight-request texts (None: no hindsight label), and counts."""
+    rng = np.random.default_rng(seed)
+    held = sorted(set(heldout))
+    others = [g for g in range(N_GOALS) if g not in held]
+    keep_goals = lambda gs: not (gs & frozenset(held))
+    expert = ExpertPool(workers)
+    out = dict(grid=[], pf=[], inv=[], a=[], b=[], request=[], message=[], hindsight=[])
+    counts = Counter()
+    n_ep = 0
+    while counts["generated"] < n_episodes:
+        n = min(chunk, n_episodes - counts["generated"])
+        req = sample_requests(rng, n, rng.integers(0, 2 ** 31, size=n))
+        own = req.goals.copy()                           # the request with held-out goals replaced
+        for b in range(n):
+            row = [g for g in own[b] if g >= 0]
+            row = sorted({g if g not in held else int(rng.choice([o for o in others if o not in row])) for g in row},
+                         key=lambda g: -g)
+            own[b] = -1
+            own[b, :len(row)] = row
+        indep = sample_requests(rng, n, req.seeds, combo_filter=keep_goals).goals
+        beh = Requests(np.where((rng.random(n) < q)[:, None], own, indep), req.seeds)
+        p = np.asarray(levels)[rng.integers(len(levels), size=n)]
+
+        def act_fn(e, t):
+            ex = expert(e, beh.goals, np.nonzero(~e.done)[0])
+            return np.where(rng.random(n) < p, ex, rng.integers(N_WORLD_ACTIONS, size=n))
+
+        env, log, snaps, acts, valid, sat_b, mask_b = run_episodes(cfg, beh, act_fn)
+        sat_r, _ = requirement_status(env, req)
+        facts = episode_facts_all(log, env, req.goals, sat_r)
+        done_by_agent = valid.sum(1) < cfg.max_steps
+        grid, pf, inv, a, b, _ = stack_steps(snaps, acts, valid)
+        new_id = np.full(n, -1)
+        for e, f in enumerate(facts):
+            counts["generated"] += 1
+            if any(achieved(f, h) for h in held):
+                counts["dropped_heldout_achieved"] += 1
+                continue
+            new_id[e] = n_ep
+            n_ep += 1
+            out["request"].append(req.text(e))
+            text = " ".join(x[2] for x in compose(f, profile, rng)) or "Okay."
+            out["message"].append(text)
+            counts["messages_naming_heldout"] += any(GOALS[h].phrase in text for h in held)
+            ok_b = bool((sat_b[e] | ~mask_b[e]).all()) and done_by_agent[e]
+            out["hindsight"].append(beh.text(e) if ok_b else None)
+            counts["hindsight"] += ok_b
+        sel = new_id[b] >= 0
+        for k, v in (("grid", grid), ("pf", pf), ("inv", inv), ("a", a)):
+            out[k].append(v[sel])
+        out["b"].append(new_id[b[sel]])
+    expert.close()
+    for k in ("grid", "pf", "inv", "a", "b"):
+        out[k] = np.concatenate(out[k])
+    counts["episodes"] = n_ep
+    counts["steps"] = len(out["a"])
+    return out, dict(counts)
+
+
+class PerceptionHeads(nn.Module):
+    """Auxiliary heads for pixel pretraining, read off the encoder's feature map: the cell type at every location, the
+    agent's position, and its facing. The targets are the symbolic observation the renderer draws from, so this is
+    self-supervised perception pretraining (a stand-in for the visual pretraining an agent brings); the heads are
+    dropped afterwards. Without it the pixel pathway can sit on the action-marginal plateau for a long time, because
+    every action in this world is gated by where the agent is and what it faces."""
+
+    def __init__(self, ch):
+        super().__init__()
+        self.cell = nn.Conv2d(ch, N_CELLS, 1)
+        self.agent = nn.Conv2d(ch, 1, 1)
+        self.face = nn.Conv2d(ch, 4, 1)
+
+    def loss(self, f, x):
+        """Mean of the three cross-entropies for feature map f (B, ch, S, S) and symbolic observation x."""
+        B = len(x)
+        cells = x[:, :N_CELLS].argmax(1)                                   # (B, S, S)
+        pos = x[:, N_CELLS].flatten(1).argmax(1)                           # (B,)
+        face = x[:, N_CELLS + 1:N_CELLS + 5].flatten(2).sum(2).argmax(1)   # (B,)
+        l_cell = F_.cross_entropy(self.cell(f), cells)
+        l_pos = F_.cross_entropy(self.agent(f).flatten(1), pos)
+        l_face = F_.cross_entropy(self.face(f).flatten(2)[torch.arange(B, device=x.device), :, pos], face)
+        return l_cell + l_pos + l_face
+
+
+def pretrain_lang(cfg, device, corpus, steps=10_000, batch=512, lr=1e-3, seed=0, arch=None, log_every=0,
+                  heldout_frac=0.05, max_eval_steps=100_000, perception=0.0):
+    """BC of one network in two modes on a lang_corpus: request mode, prompt_text(hindsight request), on episodes with
+    a hindsight label; message mode, prompt_text(request, message) -- GFT's pi^fb prompt -- on all episodes. Each
+    batch is half of each. A share heldout_frac of the episodes is never trained on; every log_every steps the held-out
+    loss per mode is measured, and the message's information gain: held-out message-mode loss under another
+    episode's message (same request where possible) minus under the episode's own -- positive iff the actions
+    depend on what the message says. Returns the model and that history."""
+    torch.manual_seed(seed)
+    rng = np.random.default_rng(seed)
+    model = CleanPolicy(cfg.size, **(arch or {})).to(device)
+    heads = PerceptionHeads(model.enc.ch).to(device) if perception and (arch or {}).get("pixels") else None
+    opt = torch.optim.Adam(list(model.parameters()) + (list(heads.parameters()) if heads else []), lr=lr)
+    n_ep = len(corpus["request"])
+    has_h = np.array([h is not None for h in corpus["hindsight"]])
+    held = np.zeros(n_ep, bool)
+    held[rng.choice(n_ep, size=int(heldout_frac * n_ep), replace=False)] = True
+    # swapped messages for the held-out episodes: another held-out episode's, of the same request where possible
+    swap = np.arange(n_ep)
+    by_req = {}
+    for e in np.nonzero(held)[0]:
+        by_req.setdefault(corpus["request"][e], []).append(e)
+    for e in np.nonzero(held)[0]:
+        same = [o for o in by_req[corpus["request"][e]] if o != e]
+        swap[e] = rng.choice(same) if same else rng.choice([o for o in np.nonzero(held)[0] if o != e] or [e])
+    tok_h = prompt_tokens([prompt_text(h or "") for h in corpus["hindsight"]], device)
+    tok_m = prompt_tokens([prompt_text(r, m) for r, m in zip(corpus["request"], corpus["message"])], device)
+    tok_s = prompt_tokens([prompt_text(r, corpus["message"][swap[e]]) for e, r in enumerate(corpus["request"])], device)
+    L = max(t.shape[1] for t in (tok_h, tok_m, tok_s))
+    tok = torch.cat([F_.pad(t, (0, L - t.shape[1])) for t in (tok_h, tok_m, tok_s)])   # prompt id: e | n_ep+e | 2n_ep+e
+    b_all = corpus["b"]
+    train_step = ~held[b_all]
+    steps_h = torch.as_tensor(np.nonzero(has_h[b_all] & train_step)[0], device=device)
+    steps_m = torch.as_tensor(np.nonzero(train_step)[0], device=device)
+    a_t = torch.as_tensor(corpus["a"], device=device)
+    b_t = torch.as_tensor(b_all, device=device)
+    grid, pf, inv = on_device(device, corpus["grid"], corpus["pf"].astype(np.int16), corpus["inv"].astype(np.int16))
+    offset = torch.cat([torch.zeros(batch // 2, dtype=torch.long), torch.full((batch - batch // 2,), n_ep)]).to(device)
+    gen = torch.Generator(device=device).manual_seed(seed)
+
+    def subsample(sel):
+        idx = np.nonzero(sel)[0]
+        return idx[:: max(1, len(idx) // max_eval_steps)]
+    ev_h, ev_m = subsample(held[b_all] & has_h[b_all]), subsample(held[b_all])
+
+    @torch.no_grad()
+    def loss_on(idx, prompt_offset):
+        """Mean per-step CE on the steps idx, prompts of their episodes shifted by prompt_offset (mode)."""
+        if len(idx) == 0:
+            return float("nan")
+        tot = 0.0
+        for j in range(0, len(idx), FWD_CHUNK):
+            i = torch.as_tensor(idx[j:j + FWD_CHUNK], device=device)
+            x, iv = obs_tensor(grid[i], pf[i], inv[i], device)
+            eps, inverse = torch.unique(b_t[i] + prompt_offset, return_inverse=True)
+            logits, _ = model(x, iv, model.encode_prompt(tok[eps])[inverse])
+            tot += float(F_.cross_entropy(logits, a_t[i], reduction="sum"))
+        return tot / len(idx)
+
+    l_perc = torch.zeros(())
+
+    def diagnostics(step, ce):
+        model.eval()
+        own, swapped = loss_on(ev_m, n_ep), loss_on(ev_m, 2 * n_ep)
+        row = dict(step=step, request=float(ce[:batch // 2].mean()), message=float(ce[batch // 2:].mean()),
+                   heldout_request=loss_on(ev_h, 0), heldout_message=own, heldout_swapped=swapped,
+                   info_gain=swapped - own)
+        model.train()
+        print(f"  pretrain {step}/{steps}: train CE request {row['request']:.3f} message {row['message']:.3f} | "
+              f"held-out CE request {row['heldout_request']:.3f} message {own:.3f} | message info gain "
+              f"{row['info_gain']:+.4f} nats/step" + (f" | perception {float(l_perc):.3f}" if heads is not None else ""),
+              flush=True)
+        return row
+
+    hist = []
+    for s in range(steps):                                           # batches drawn on the device: no host copies
+        i = torch.cat([steps_h[torch.randint(len(steps_h), (batch // 2,), device=device, generator=gen)],
+                       steps_m[torch.randint(len(steps_m), (batch - batch // 2,), device=device, generator=gen)]])
+        pid = b_t[i] + offset
+        x, iv = obs_tensor(grid[i], pf[i], inv[i], device)
+        eps, inverse = torch.unique(pid, return_inverse=True)
+        logits, _, (_, f, _) = model(x, iv, model.encode_prompt(tok[eps])[inverse], return_h=True)
+        ce = F_.cross_entropy(logits, a_t[i], reduction="none")
+        loss = ce.mean()
+        if heads is not None:
+            l_perc = heads.loss(f, x)
+            loss = loss + perception * l_perc
+        opt.zero_grad()
+        loss.backward()
+        opt.step()
+        if log_every and (s + 1) % log_every == 0:
+            row = diagnostics(s + 1, ce.detach())
+            if heads is not None:
+                row["perception"] = float(l_perc.detach())
+            hist.append(row)
+    return model, hist
+
+
+# ---------------------------------------------------------------- entropy control (GFT and PPO)
 
 class EntropyController:
     """Automatic entropy coefficient (as in SAC): after each update log(alpha) moves by lr * (target - entropy), so
@@ -951,335 +1415,6 @@ class EntropyController:
         self.log_alpha = sd["log_alpha"]
 
 
-@dataclass
-class GFTConfig:
-    episodes: int = 256          # Stage I on-policy episodes per round (teacher calls)
-    stage2: int = 256            # Stage II ideal-feedback rollouts per round (G* samples)
-    profile: str = "realistic"   # teacher (gft.minicraft.teacher): structured like human feedback
-    lr_aux: float = 3e-4
-    lr_clean: float = 3e-4
-    epochs_aux: int = 1          # Stage I passes over pi^fb's training data (current round + replay) per round
-    epochs_clean: int = 1        # Stage II passes over the distillation data per round
-    replay_rounds: int = 1       # pi^fb trains on Stage I data of the last `replay_rounds` rounds (1 = this round only)
-    minibatch: int = 1024
-    aux_entropy: float = 0.0     # entropy bonus on pi^fb's Stage I fit (flatter reader)
-    stage2_temperature: float = 1.0  # sampling temperature of pi^fb's Stage II rollouts (targets stay at T=1)
-    clean_entropy: float = 0.0   # entropy bonus on pi's distillation loss (keeps pi from collapsing)
-    entropy_target: float = None  # nats per step: adapt the distillation entropy bonus to hold pi's entropy here
-    base_share: float = 0.0      # diagnostic: share of Stage I episodes acted by the frozen base policy instead of pi
-                                 # (keeps events pi has stopped producing in pi^fb's data; curriculum sees pi's only)
-    masked_claims: int = 0       # Stage I: per episode, up to this many extra examples whose prompt keeps ONE spanned
-                                 # sentence (rest masked) with loss only on the steps it is about (teacher.claim_steps)
-    episode_chunk: int = 16      # Stage I minibatches = minibatch // episode_chunk episodes x episode_chunk steps each
-                                 # (0 = uniform random steps); fewer distinct feedback messages to encode per update
-    damp: float = 0.3            # Stage II target = (1 - damp) * pi_old + damp * pi^fb (damped operator, Prop. C.1)
-    aux_weight_decay: float = 1e-4
-    fb_word_dropout: float = 0.1  # Stage I: drop feedback words at random so pi^fb cannot memorize episodes
-    no_feedback: bool = False    # ablation: pi^fb's prompt is the request alone in both stages (teacher still called)
-
-
-def _n_request_tokens(req):
-    """Token count of each episode's request-only prompt (feedback tokens come after it)."""
-    return np.array([len(re.findall(r"[a-z]+|\d+", prompt_text(req.text(b)).lower())) for b in range(len(req))])
-
-
-class GFT:
-    """Batch GFT with incremental updates. pi (`clean`) is prompted with the request; pi^fb (`aux`) is a copy of the
-    same network prompted with the request plus feedback (LLM-style), both starting from the shared base."""
-
-    def __init__(self, cfg, pool, base, device, gcfg: GFTConfig, seed=0, curriculum: CurriculumConfig = None,
-                 ppo: "PPOConfig" = None):
-        """ppo: also give pi a PPO update on each round's Stage I episodes (reward = fraction of requirements met,
-        read from the same episodes), before the distillation update -- GFT+PPO."""
-        self.cfg, self.pool, self.device, self.g = cfg, pool, device, gcfg
-        self.rng = np.random.default_rng(seed)
-        self.cur = curriculum if hasattr(curriculum, "sample") else Curriculum(pool, curriculum or CurriculumConfig())
-        self.seen_claims = []                     # claim types voiced in actual feedback, last COVERAGE_ROUNDS rounds
-        self.clean = base
-        self.aux = copy.deepcopy(base)
-        self.opt_aux = torch.optim.AdamW(self.aux.parameters(), lr=gcfg.lr_aux, weight_decay=gcfg.aux_weight_decay)
-        self.opt_clean = torch.optim.Adam(self.clean.parameters(), lr=gcfg.lr_clean)
-        self.episodes = self.teacher_calls = self.gstar = 0
-        self.ppo = PPO(cfg, pool, self.clean, device, ppo, seed=seed + 1, curriculum=self.cur) if ppo else None
-        self.ent_ctl = EntropyController(gcfg.entropy_target, gcfg.clean_entropy or 0.01 if gcfg.entropy_target
-                                         else gcfg.clean_entropy)
-        self.base = copy.deepcopy(base).eval() if gcfg.base_share > 0 else None     # frozen copy for the diagnostic
-        self.replay = []                          # Stage I training data of recent rounds (dicts of CPU tensors)
-
-    def state_dict(self):
-        """Everything needed to resume exactly: networks, optimizers, counters, RNG state, replay buffer."""
-        return dict(clean=self.clean.state_dict(), aux=self.aux.state_dict(), opt_aux=self.opt_aux.state_dict(),
-                    opt_clean=self.opt_clean.state_dict(), rng=self.rng.bit_generator.state,
-                    counters=(self.episodes, self.teacher_calls, self.gstar), curriculum=self.cur.state_dict(),
-                    seen_claims=self.seen_claims, replay=self.replay,
-                    ppo=self.ppo.state_dict() if self.ppo else None, ent_ctl=self.ent_ctl.state_dict())
-
-    def load_state_dict(self, sd):
-        self.cur.load_state_dict(sd["curriculum"])
-        self.seen_claims = sd["seen_claims"]
-        self.replay = sd["replay"]
-        if self.ppo:
-            self.ppo.load_state_dict(sd["ppo"])
-        if "ent_ctl" in sd:                       # checkpoints from before the entropy controller
-            self.ent_ctl.load_state_dict(sd["ent_ctl"])
-        self.clean.load_state_dict(sd["clean"])
-        self.aux.load_state_dict(sd["aux"])
-        self.opt_aux.load_state_dict(sd["opt_aux"])
-        self.opt_clean.load_state_dict(sd["opt_clean"])
-        self.rng.bit_generator.state = sd["rng"]
-        self.episodes, self.teacher_calls, self.gstar = sd["counters"]
-
-    @torch.no_grad()
-    def _reader_losses(self, grid, pf, inv, a_t, b_t, tok_fb, tok_req, step_heldout, cap=4096):
-        """pi^fb's action log-loss with feedback on training vs held-out Stage I episodes (memorization check), and
-        on held-out episodes without the feedback (the gap = how much pi^fb uses the feedback)."""
-        out = {}
-        for name, sel, tok in (("seen", ~step_heldout, tok_fb), ("heldout", step_heldout, tok_fb),
-                               ("heldout_no_feedback", step_heldout, tok_req)):
-            sel = np.nonzero(sel)[0]
-            if len(sel) == 0:
-                out[name] = float("nan")
-                continue
-            sel = self.rng.choice(sel, size=min(cap, len(sel)), replace=False)
-            eps, inverse = torch.unique(b_t[sel], return_inverse=True)
-            x, iv = obs_tensor(grid[sel], pf[sel], inv[sel], self.device)
-            out[name] = float(F_.cross_entropy(self.aux(x, iv, self.aux.encode_prompt(tok[eps])[inverse])[0], a_t[sel]))
-        return out
-
-    def _episode_batches(self, b, epochs):
-        """Minibatches that each pass cover every step exactly once, but draw from few episodes: each episode's steps
-        are shuffled into chunks of `episode_chunk`, chunks are shuffled, and minibatch // episode_chunk chunks form a
-        minibatch -- so the text encoder runs on at most that many feedback messages per update."""
-        S = self.g.episode_chunk
-        units_per_mb = max(1, self.g.minibatch // S)
-        n = len(b)
-        for _ in range(epochs):
-            order = np.lexsort((self.rng.random(n), b))      # steps grouped by episode, random order within
-            bs = b[order]
-            rank = np.arange(n) - np.searchsorted(bs, bs, side="left")
-            _, unit = np.unique(bs * (n + 1) + rank // S, return_inverse=True)
-            unit_pos = self.rng.permutation(unit.max() + 1)[unit] // units_per_mb   # minibatch of each step
-            grouped = np.argsort(unit_pos, kind="stable")
-            for chunk in np.split(order[grouped], np.flatnonzero(np.diff(unit_pos[grouped])) + 1):
-                yield chunk
-
-    def _batches(self, n, epochs):
-        for _ in range(epochs):
-            perm = self.rng.permutation(n)
-            for j in range(0, n, self.g.minibatch):
-                yield perm[j: j + self.g.minibatch]
-
-    def _add_masked_claims(self, entry, log, parts, req, b, t, ep_keep, grid, pf, inv, a_t, dev):
-        """Append pseudo-episodes to a round's Stage I data: for each kept episode, up to `masked_claims` voiced
-        sentences that have a step span; prompt = request + that sentence alone, steps = the episode's steps inside
-        the span (so the loss falls only on the steps the sentence is about)."""
-        texts, rows, n_req = [], [], []
-        n_req_ep = _n_request_tokens(req)
-        ev = event_arrays(log)                               # once per round
-        first = np.searchsorted(b, np.arange(len(req)))     # steps are grouped by episode, t = 0, 1, ... within
-        length = np.bincount(b, minlength=len(req))
-        for e in ep_keep:
-            cands = parts[e]
-            n = 0
-            for i in self.rng.permutation(len(cands)):
-                if n >= self.g.masked_claims:
-                    break
-                _, claim, sentence = cands[i]
-                span = claim_steps(ev, e, claim)
-                if span is None:
-                    continue
-                r = first[e] + span[span < length[e]]
-                if len(r) == 0:
-                    continue
-                texts.append(prompt_text(req.text(e), sentence))
-                rows.append(r)
-                n_req.append(n_req_ep[e])
-                n += 1
-        if not texts:
-            return entry
-        tok_m = prompt_tokens(texts, dev).cpu()
-        fb_m = torch.arange(tok_m.shape[1])[None, :] >= torch.as_tensor(n_req)[:, None]
-        r = torch.as_tensor(np.concatenate(rows), device=dev)
-        pid = torch.as_tensor(np.repeat(np.arange(len(rows)), [len(x) for x in rows])) + len(entry["tok"])
-        L = max(entry["tok"].shape[1], tok_m.shape[1])
-        pad = lambda x, v=0: F_.pad(x, (0, L - x.shape[1]), value=v)
-        return dict(grid=torch.cat([entry["grid"], grid[r].cpu()]), pf=torch.cat([entry["pf"], pf[r].cpu()]),
-                    inv=torch.cat([entry["inv"], inv[r].cpu()]), a=torch.cat([entry["a"], a_t[r].cpu()]),
-                    b=torch.cat([entry["b"], pid]), tok=torch.cat([pad(entry["tok"]), pad(tok_m)]),
-                    fb_pos=torch.cat([pad(entry["fb_pos"], True), pad(fb_m, True)]))
-
-    def _replay_tensors(self, dev):
-        """Concatenate the replay buffer on the device: steps, actions, per-episode prompt tokens (padded to a common
-        length) and feedback-word positions, with episode ids made unique across rounds."""
-        L = max(r["tok"].shape[1] for r in self.replay)
-        pad = lambda t: F_.pad(t, (0, L - t.shape[1]))
-        out = {k: torch.cat([r[k] for r in self.replay]).to(dev) for k in ("grid", "pf", "inv", "a")}
-        offs = np.cumsum([0] + [len(r["tok"]) for r in self.replay[:-1]])
-        out["b"] = torch.cat([r["b"] + o for r, o in zip(self.replay, offs)]).to(dev)
-        out["tok"] = torch.cat([pad(r["tok"]) for r in self.replay]).to(dev)
-        out["fb_pos"] = torch.cat([F_.pad(r["fb_pos"], (0, L - r["fb_pos"].shape[1]), value=True)
-                                   for r in self.replay]).to(dev)
-        return out
-
-    def round(self):
-        """One Batch GFT round. Returns diagnostics: success of on-policy (Stage I) and ideal-feedback-conditioned
-        (Stage II) rollouts, mean losses, timings, and a few example (request, feedback) pairs."""
-        g, cfg, dev = self.g, self.cfg, self.device
-        tm = {}
-        t0 = time.time()
-        # Stage I: on-policy episodes of pi, teacher feedback, SGD on pi^fb (prompt = request + feedback).
-        idx = self.cur.sample(self.rng, g.episodes)
-        req = self.pool.requests(idx)
-        prompt = request_prompts(self.clean, req, dev)
-        if self.base is None:
-            env, log, snaps, acts, valid, sat, mask = run_episodes(
-                cfg, req, lambda e, t: policy_actions(self.clean, e, req, dev, self.rng, prompt=prompt))
-            from_pi = np.ones(len(req), bool)
-        else:                                         # diagnostic: some episodes acted by the frozen base policy
-            from_pi = self.rng.random(len(req)) >= g.base_share
-            p_base = request_prompts(self.base, req, dev)
-            env, log, snaps, acts, valid, sat, mask = run_episodes(cfg, req, lambda e, t: np.where(
-                from_pi, policy_actions(self.clean, e, req, dev, self.rng, prompt=prompt),
-                policy_actions(self.base, e, req, dev, self.rng, prompt=p_base)))
-        tm["stage1_rollout"] = time.time() - t0
-        t0 = time.time()
-        self.cur.update(req.goals[from_pi], sat[from_pi], mask[from_pi], self.episodes + g.episodes,
-                        feedbacks=self.teacher_calls + g.episodes)
-        ppo_stats = {}
-        if self.ppo:                                  # GFT+PPO: reward update of pi on its own Stage I episodes
-            t1 = time.time()
-            tok_r = prompt_tokens([prompt_text(req.text(i)) for i in range(len(req))], dev)
-            ppo_stats = {f"ppo_{k}": v for k, v in self.ppo.update(req, tok_r, prompt, snaps, acts, valid, sat,
-                                                                   mask).items()}
-            tm["ppo_update"] = time.time() - t1
-        facts = [episode_facts(log, b, env, req.goals[b], sat[b]) for b in range(len(req))]
-        parts = [compose(f, g.profile, self.rng) for f in facts]
-        # diagnostics: per goal, share of Stage I episodes in which it was achieved / achieved and mentioned
-        coverage = {GOALS[k].phrase: [float(np.mean([achieved(f, k) for f in facts])),
-                                      float(np.mean([achieved(f, k) and any(mentions(x[1], k) for x in pt)
-                                                     for f, pt in zip(facts, parts)]))] for k in range(N_GOALS)}
-        texts = [None if g.no_feedback else " ".join(x[2] for x in p) or "Okay." for p in parts]
-        self.seen_claims = (self.seen_claims + [Counter(claim_type(x[1]) for p in parts for x in p)])[-COVERAGE_ROUNDS:]
-        tm["teacher"] = time.time() - t0
-        t0 = time.time()
-        tok = prompt_tokens([prompt_text(req.text(b), texts[b]) for b in range(len(req))], dev)
-        tok_req = prompt_tokens([prompt_text(req.text(b)) for b in range(len(req))], dev)
-        fb_pos = (torch.arange(tok.shape[1], device=dev)[None, :] >=
-                  torch.as_tensor(_n_request_tokens(req), device=dev)[:, None])       # feedback-word positions
-        grid, pf, inv, a, b, t_steps = stack_steps(snaps, acts, valid)
-        grid, pf, inv = on_device(dev, grid, pf, inv)
-        a_t = torch.as_tensor(a, device=dev)
-        b_t = torch.as_tensor(b, device=dev)
-        aux_losses, distill_losses = [], []
-        heldout_ep = self.rng.random(len(req)) < HELDOUT_FRAC     # episodes kept out of Stage I to test the reader
-        keep = torch.as_tensor(~heldout_ep[b], device=dev)
-        ep_keep = np.nonzero(~heldout_ep)[0]
-        remap = torch.full((len(req),), -1, dtype=torch.long, device=dev)
-        remap[torch.as_tensor(ep_keep, device=dev)] = torch.arange(len(ep_keep), device=dev)
-        entry = dict(grid=grid[keep].cpu(), pf=pf[keep].cpu(), inv=inv[keep].cpu(), a=a_t[keep].cpu(),
-                     b=remap[b_t[keep]].cpu(), tok=tok[torch.as_tensor(ep_keep, device=dev)].cpu(),
-                     fb_pos=fb_pos[torch.as_tensor(ep_keep, device=dev)].cpu())
-        if g.masked_claims:
-            entry = self._add_masked_claims(entry, log, parts, req, b, t_steps, ep_keep, grid, pf, inv, a_t, dev)
-        self.replay = (self.replay + [entry])[-g.replay_rounds:]
-        R = self._replay_tensors(dev)
-        batches = (self._episode_batches(R["b"].cpu().numpy(), g.epochs_aux) if g.episode_chunk
-                   else self._batches(len(R["a"]), g.epochs_aux))
-        for mb in batches:
-            mb = torch.as_tensor(mb, device=dev)
-            x, iv = obs_tensor(R["grid"][mb], R["pf"][mb], R["inv"][mb], dev)
-            eps, inverse = torch.unique(R["b"][mb], return_inverse=True)   # encode each episode's prompt once
-            tk = R["tok"][eps]
-            if g.fb_word_dropout > 0:
-                drop = R["fb_pos"][eps] & (torch.rand(tk.shape, device=dev) < g.fb_word_dropout)
-                tk = torch.where(drop, torch.zeros_like(tk), tk)
-            lg_aux = self.aux(x, iv, self.aux.encode_prompt(tk)[inverse])[0]
-            loss = F_.cross_entropy(lg_aux, R["a"][mb])
-            if g.aux_entropy:
-                lp = F_.log_softmax(lg_aux, -1)
-                loss = loss + g.aux_entropy * (lp.exp() * lp).sum(-1).mean()        # minus entropy
-            self.opt_aux.zero_grad()
-            loss.backward()
-            self.opt_aux.step()
-            aux_losses.append(loss.detach())
-        reader = self._reader_losses(grid, pf, inv, a_t, b_t, tok, tok_req, heldout_ep[b])
-        tm["stage1_update"] = time.time() - t0
-        self.episodes += g.episodes
-        self.teacher_calls += g.episodes
-        t0 = time.time()
-        # Stage II: ideal feedback from the success bank; roll out pi^fb; distill its distribution into pi.
-        idx2 = self.cur.sample(self.rng, g.stage2)
-        req2 = self.pool.requests(idx2)
-        star_parts = [compose(self.pool.ideal_facts(i, self.rng), g.profile, self.rng) for i in idx2]
-        star = [" ".join(x[2] for x in p) or "Okay." for p in star_parts]
-        star_prompt = [None] * len(star) if g.no_feedback else star
-        seen = sum(self.seen_claims, Counter())
-        star_types = [{claim_type(x[1]) for x in p} for p in star_parts]
-        unseen = Counter(c for ts in star_types for c in ts if c not in seen)
-        prompt_fb2 = request_prompts(self.aux, req2, dev, feedback=star_prompt)
-        env2, _, snaps2, acts2, valid2, sat2, mask2 = run_episodes(
-            cfg, req2, lambda e, t: policy_actions(self.aux, e, req2, dev, self.rng, prompt=prompt_fb2,
-                                                   temperature=g.stage2_temperature))
-        tm["stage2_rollout"] = time.time() - t0
-        t0 = time.time()
-        grid, pf, inv, _, b, _ = stack_steps(snaps2, acts2, valid2)
-        grid, pf, inv = on_device(dev, grid, pf, inv)
-        b_t = torch.as_tensor(b, device=dev)
-        tok_req2 = prompt_tokens([prompt_text(req2.text(i)) for i in range(len(req2))], dev)
-        with torch.no_grad():                                   # pi_old and pi^fb on all Stage II states
-            p_req2 = self.clean.encode_prompt(tok_req2)
-            old_probs, fb_probs = [], []
-            for j in range(0, len(b), FWD_CHUNK):
-                x, iv = obs_tensor(grid[j:j + FWD_CHUNK], pf[j:j + FWD_CHUNK], inv[j:j + FWD_CHUNK], dev)
-                old_probs.append(F_.softmax(self.clean(x, iv, p_req2[b_t[j:j + FWD_CHUNK]])[0], -1))
-                fb_probs.append(F_.softmax(self.aux(x, iv, prompt_fb2[b_t[j:j + FWD_CHUNK]])[0], -1))
-            old_probs, fb_probs = torch.cat(old_probs), torch.cat(fb_probs)
-        ent_fb, ent_clean = [], []
-        for mb in self._batches(len(b), g.epochs_clean):
-            x, iv = obs_tensor(grid[mb], pf[mb], inv[mb], dev)
-            eps, inverse = torch.unique(b_t[mb], return_inverse=True)
-            logits, _ = self.clean(x, iv, self.clean.encode_prompt(tok_req2[eps])[inverse])
-            with torch.no_grad():
-                p_fb, p_old = fb_probs[mb], old_probs[mb]
-                target = (1 - g.damp) * p_old + g.damp * p_fb
-                ent_fb.append(-(p_fb * p_fb.clamp_min(1e-12).log()).sum(-1).mean())
-                ent_clean.append(-(p_old * p_old.clamp_min(1e-12).log()).sum(-1).mean())
-            lp = F_.log_softmax(logits, -1)
-            loss = -(target * lp).sum(-1).mean()                                # logit (expected-gradient) distillation
-            ent_pi = -(lp.exp() * lp).sum(-1).mean()
-            if self.ent_ctl.alpha:
-                loss = loss - self.ent_ctl.alpha * ent_pi                       # entropy bonus on pi
-            self.opt_clean.zero_grad()
-            loss.backward()
-            self.opt_clean.step()
-            self.ent_ctl.update(ent_pi.detach())
-            distill_losses.append(loss.detach())
-        tm["stage2_update"] = time.time() - t0
-        self.episodes += g.stage2
-        self.gstar += g.stage2
-        per_goal = lambda gl, st: {GOALS[k].phrase: float(st[gl == k].mean()) for k in range(N_GOALS) if (gl == k).any()}
-        return dict(stage1_success=float((sat | ~mask).all(1).mean()),
-                    # per goal: requirement success of pi (Stage I) and of pi^fb under ideal feedback (Stage II)
-                    stage1_per_goal=per_goal(req.goals, sat), stage2_per_goal=per_goal(req2.goals, sat2),
-                    stage1_coverage=coverage,
-                    stage1_frac=float((sat & mask).sum() / mask.sum()),
-                    stage2_success=float((sat2 | ~mask2).all(1).mean()),        # pi^fb under ideal feedback
-                    aux_loss=mean_stat(aux_losses), distill_loss=mean_stat(distill_losses),
-                    entropy_clean=mean_stat(ent_clean), entropy_fb=mean_stat(ent_fb),
-                    # coverage: share of ideal messages whose every claim type was voiced in actual feedback in the
-                    # last COVERAGE_ROUNDS rounds; unseen: ideal claim types never voiced there (with counts)
-                    coverage=float(np.mean([ts <= seen.keys() for ts in star_types])),
-                    unseen_claims={repr(k): v for k, v in unseen.most_common()},
-                    # pi^fb log-loss: training vs held-out episodes (memorization), held-out without feedback (use)
-                    reader_loss_seen=reader["seen"], reader_loss_heldout=reader["heldout"],
-                    reader_loss_heldout_no_feedback=reader["heldout_no_feedback"],
-                    curriculum_unlocked=self.cur.unlocked, **ppo_stats, entropy_alpha=self.ent_ctl.alpha,
-                    time=tm,
-                    examples=[dict(request=req.text(i), feedback=texts[i], success=bool((sat[i] | ~mask[i]).all()))
-                              for i in range(3)] +
-                             [dict(request=req2.text(i), ideal_feedback=star[i]) for i in range(2)])
-
-
 # ---------------------------------------------------------------- PPO baseline
 
 @dataclass
@@ -1294,6 +1429,10 @@ class PPOConfig:
     lam: float = 0.95
     ent: float = 0.01
     entropy_target: float = None  # nats per step: adapt the entropy coefficient to hold the policy's entropy here
+    advantage: str = "gae"        # gae: critic + GAE (per-step credit) | group: GRPO, the episode's reward standardized
+                                  # within its request's group of episodes, the same for every step, no critic
+    profile: str = "realistic"    # teacher for reward=parse
+    value_warmup: int = 0         # first rounds fit only the critic (the policy is not updated; episodes still count)
 
 
 class PPO:
@@ -1304,11 +1443,12 @@ class PPO:
         self.model = base
         self.opt = torch.optim.Adam(self.model.parameters(), lr=pcfg.lr)
         self.ent_ctl = EntropyController(pcfg.entropy_target, pcfg.ent)
-        self.episodes = self.verifier_calls = 0
+        self.episodes = self.verifier_calls = self.teacher_calls = self.rounds = 0
 
     def state_dict(self):
         return dict(model=self.model.state_dict(), opt=self.opt.state_dict(), rng=self.rng.bit_generator.state,
-                    counters=(self.episodes, self.verifier_calls), curriculum=self.cur.state_dict(),
+                    counters=(self.episodes, self.verifier_calls, self.teacher_calls, self.rounds),
+                    curriculum=self.cur.state_dict(),
                     ent_ctl=self.ent_ctl.state_dict())
 
     def load_state_dict(self, sd):
@@ -1318,7 +1458,8 @@ class PPO:
         self.model.load_state_dict(sd["model"])
         self.opt.load_state_dict(sd["opt"])
         self.rng.bit_generator.state = sd["rng"]
-        self.episodes, self.verifier_calls = sd["counters"]
+        c = tuple(sd["counters"]) + (0, 0)                # checkpoints from before teacher_calls / rounds
+        self.episodes, self.verifier_calls, self.teacher_calls, self.rounds = c[:4]
 
     def round(self):
         """One PPO round. Returns diagnostics: training success, losses, entropy, approx KL, clip fraction, timings."""
@@ -1330,22 +1471,36 @@ class PPO:
         tok = prompt_tokens([prompt_text(req.text(i)) for i in range(len(req))], dev)
         with torch.no_grad():
             prompt = self.model.encode_prompt(tok)
-        env, _, snaps, acts, valid, sat, mask = run_episodes(
+        env, log, snaps, acts, valid, sat, mask = run_episodes(
             cfg, req, lambda e, t: policy_actions(self.model, e, req, dev, self.rng, prompt=prompt))
         self.cur.update(req.goals, sat, mask, self.episodes + p.episodes, feedbacks=self.episodes + p.episodes)
         tm["rollout"] = time.time() - t0
         t0 = time.time()
-        stats = self.update(req, tok, prompt, snaps, acts, valid, sat, mask)
+        r_ep, extra = None, {}
+        if p.reward == "parse":                       # information-matched: the scalar read off the teacher's message
+            facts = episode_facts_all(log, env, req.goals, sat)
+            texts = [" ".join(x[2] for x in compose(f, p.profile, self.rng)) or "Okay." for f in facts]
+            r_ep = np.array([reported_fraction(t, req.goals[i]) for i, t in enumerate(texts)])
+            true = (sat & mask).sum(1) / mask.sum(1)
+            extra = dict(parse_matches_frac=float(np.isclose(r_ep, true).mean()))
+            self.teacher_calls += p.episodes
+        else:
+            self.verifier_calls += p.episodes
+        stats = self.update(req, tok, prompt, snaps, acts, valid, sat, mask, r_ep=r_ep,
+                            value_only=self.rounds < p.value_warmup)
         tm["update"] = time.time() - t0
         self.episodes += p.episodes
-        self.verifier_calls += p.episodes
+        self.rounds += 1
         return dict(train_success=float((sat | ~mask).all(1).mean()), train_frac=float((sat & mask).sum() / mask.sum()),
-                    **stats, time=tm, curriculum_unlocked=self.cur.unlocked)
+                    **stats, **extra, time=tm, curriculum_unlocked=self.cur.unlocked)
 
-    def update(self, req, tok, prompt, snaps, acts, valid, sat, mask):
-        """PPO update of self.model on one batch of its own episodes (terminal reward per episode, GAE)."""
+    def update(self, req, tok, prompt, snaps, acts, valid, sat, mask, r_ep=None, value_only=False):
+        """PPO update of self.model on one batch of its own episodes (terminal reward per episode, GAE). r_ep: the
+        episodes' rewards (default: from the requirement check, `reward` = bin | frac). value_only: fit the critic
+        alone (critic warm-up)."""
         p, dev = self.p, self.device
-        r_ep = (sat | ~mask).all(1).astype(float) if p.reward == "bin" else (sat & mask).sum(1) / mask.sum(1)
+        if r_ep is None:
+            r_ep = (sat | ~mask).all(1).astype(float) if p.reward == "bin" else (sat & mask).sum(1) / mask.sum(1)
         grid, pf, inv, a, b, t = stack_steps(snaps, acts, valid)
         grid, pf, inv = on_device(dev, grid, pf, inv)
         b_t = torch.as_tensor(b, device=dev)
@@ -1376,6 +1531,15 @@ class PPO:
         A = torch.as_tensor(adv[b, t], device=dev, dtype=torch.float32)
         ret = A + v_old
         A = (A - A.mean()) / (A.std() + 1e-8)
+        if p.advantage == "group":                    # GRPO: sequence-level credit, standardized within the request
+            r_np = np.asarray(r_ep, dtype=np.float64).copy()
+            groups = {}
+            for i in range(len(req)):
+                groups.setdefault(req.text(i), []).append(i)
+            for sel in groups.values():
+                sel = np.array(sel)
+                r_np[sel] = (r_np[sel] - r_np[sel].mean()) / (r_np[sel].std() + 1e-6)
+            A = torch.as_tensor(r_np[b], device=dev, dtype=torch.float32)
         stats = {k: [] for k in ("pg_loss", "v_loss", "entropy", "approx_kl", "clip_frac")}
         for _ in range(p.epochs):
             perm = self.rng.permutation(len(a))
@@ -1389,9 +1553,15 @@ class PPO:
                 pg = -torch.minimum(ratio * A[mb], ratio.clamp(1 - p.clip, 1 + p.clip) * A[mb]).mean()
                 v_loss = ((v - ret[mb]) ** 2).mean()
                 ent = (-(logp.exp() * logp).sum(-1)).mean()
-                loss = pg + 0.5 * v_loss - self.ent_ctl.alpha * ent
+                loss = (0.5 * v_loss if value_only else
+                        pg + (0.0 if p.advantage == "group" else 0.5) * v_loss - self.ent_ctl.alpha * ent)
                 self.opt.zero_grad()
                 loss.backward()
+                if value_only:                        # warm-up: only the value head moves (the trunk is shared)
+                    head = {id(q) for q in self.model.v.parameters()}
+                    for q in self.model.parameters():
+                        if id(q) not in head:
+                            q.grad = None
                 nn.utils.clip_grad_norm_(self.model.parameters(), 0.5)
                 self.opt.step()
                 with torch.no_grad():

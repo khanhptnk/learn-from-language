@@ -10,7 +10,7 @@ from gft.theory import (approximate_posterior_bias, batch_gft_tabular, condition
                          d3_counterexample, damped_run, fcp_fixed_message_closed_form, fcp_population,
                          finite_difference, gft_operator, gradient_forms, J_value, linear_softmax_batch_gft,
                          online_gft, posterior, rejection_sample, sdpo_reverse_kl_minimizer, sdpo_two_action_step,
-                         separation_gamma, sigmoid, two_action_channel)
+                         separation_gamma, two_action_channel)
 
 
 def audit(seed, n_opt=None):

@@ -8,8 +8,7 @@ cells + agent/facing channels, see learn.obs_tensor), so stored episodes stay co
 import numpy as np
 import torch
 
-from gft.minicraft.core import (BRIDGE, EMPTY, FURNACE, GEM, N_CELLS, ORE, ROCK, TREE, WALL, WATER,
-                                WORKBENCH)
+from gft.minicraft.core import CLAYPIT, EMPTY, KILN, LOOM, N_CELLS, REEDS, ROCK, SITE, TREE, WALL, WORKBENCH
 
 TILE = 6
 
@@ -25,22 +24,20 @@ def _tiles(T=TILE):
     t[TREE] = solid((120, 190, 90))
     t[TREE][1:T - 2, 1:T - 1] = np.array((30, 110, 40)) / 255    # canopy
     t[TREE][T - 2:, T // 2 - 1:T // 2 + 1] = np.array((110, 70, 30)) / 255   # trunk
+    t[REEDS] = solid((120, 190, 90))
+    t[REEDS][1:, 1::2] = np.array((200, 190, 80)) / 255   # tall yellow stalks
+    t[CLAYPIT] = solid((170, 110, 80))
+    t[CLAYPIT][1:T - 1, 1:T - 1] = np.array((130, 70, 50)) / 255   # dug hollow
     t[ROCK] = solid((150, 150, 150))
     t[ROCK][1::3, 1::3] = np.array((110, 110, 110)) / 255
-    t[ORE] = solid((150, 150, 150))
-    t[ORE][1::2, 1::3] = np.array((210, 120, 40)) / 255   # orange flecks
-    t[WATER] = solid((50, 100, 220))
-    t[WATER][::3] = np.array((90, 140, 240)) / 255        # ripples
-    t[BRIDGE] = solid((150, 100, 50))
-    t[BRIDGE][:, ::2] = np.array((120, 80, 40)) / 255     # planks
     t[WORKBENCH] = solid((170, 120, 60))
     t[WORKBENCH][1:3, 1:T - 1] = np.array((90, 60, 30)) / 255    # tool rack
-    t[FURNACE] = solid((90, 40, 40))
-    t[FURNACE][T // 2:, 1:T - 1] = np.array((240, 120, 30)) / 255  # fire
-    t[GEM] = solid((120, 190, 90))
-    for i in range(T):                                     # diamond
-        w = min(i, T - 1 - i)
-        t[GEM][i, T // 2 - w:T // 2 + w + 1] = np.array((60, 220, 230)) / 255
+    t[LOOM] = solid((230, 220, 200))
+    t[LOOM][1:T - 1, ::2] = np.array((120, 60, 140)) / 255       # purple threads
+    t[KILN] = solid((90, 40, 40))
+    t[KILN][T // 2:, 1:T - 1] = np.array((240, 120, 30)) / 255   # fire
+    t[SITE] = solid((200, 180, 140))
+    t[SITE][::2, :] = np.array((120, 120, 160)) / 255            # marked-out ground
     return t
 
 

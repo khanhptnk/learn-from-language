@@ -17,7 +17,7 @@ Distractor steps are not modelled: with tabular per-step parameters they cannot 
 the relevant steps. Their effect on credit assignment needs shared parameters (level L2).
 """
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 
 import numpy as np
 

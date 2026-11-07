@@ -1,4 +1,8 @@
-"""Expert planner for MiniCraft: greedy recipe expansion + BFS navigation, replanned every step."""
+"""Expert planner for MiniCraft: greedy recipe expansion + BFS navigation, replanned every step. Plans count the items
+in station slots as held (they can be taken back); at a station the expert takes back anything that does not belong,
+selects and puts the recipe's missing inputs one at a time, and crafts once the slot holds exactly the inputs. Before
+any step that is not a craft (collecting, or declaring done) it takes back whatever is left in station slots, so a
+goal's items and the tools are in hand."""
 
 import multiprocessing as mp
 import os
@@ -7,31 +11,30 @@ from functools import lru_cache
 
 import numpy as np
 
-from gft.minicraft.core import (BRIDGE, BRIDGE_ITEM, COLLECT, CRAFT0, DIRS, DONE, GEM, GEM_ITEM, IRON_PICKAXE, N_WORLD_ACTIONS,
-                                PASSABLE, RECIPE_FOR, RECIPES, USE, WATER)
-from gft.minicraft.goals import CROSS, GOALS
+from gft.minicraft.core import (COLLECT, CRAFT, DIRS, DONE, N_ITEMS, N_WORLD_ACTIONS, PASSABLE, PUT, RECIPE_FOR,
+                                RECIPE_IN, RECIPES, SELECT, STATION_INDEX, STATIONS, TAKE, USE)
+from gft.minicraft.goals import GOALS
 
 RAW = {item: (cell, tool) for cell, (item, tool) in COLLECT.items()}
 
 
-def plan(inv, goals, crossed, bridged):
-    """Ordered list of sub-tasks that turns `inv` into one satisfying `goals` (deepest goal first).
+def _ops_from_nothing(item):
+    return len(plan(np.zeros(N_ITEMS, np.int64), [], items=((item, 1),)))
 
-    Ops: ("collect", cell), ("craft", recipe_index), ("bridge",), ("cross",).
-    """
+
+def plan(inv, goals, items=None):
+    """Ordered list of sub-tasks that turns `inv` into one satisfying `goals` (deepest goal first), or the (item,
+    count) pairs `items`. Ops: ("collect", cell), ("craft", recipe_index).
+
+    A recipe's inputs are gathered deepest branch first, and each branch is finished before the next starts."""
     inv = inv.copy()
     ops = []
-    state = {"crossed": crossed, "bridged": bridged}
 
     def need(item, n, depth=0):
         if depth > 40:
             raise RecursionError("recipe expansion did not terminate")
         while inv[item] < n:
-            if item == GEM_ITEM:
-                need(IRON_PICKAXE, 1, depth + 1)
-                ensure_crossed(depth + 1)
-                ops.append(("collect", GEM))
-            elif item in RAW:
+            if item in RAW:
                 cell, tool = RAW[item]
                 if tool >= 0 and inv[tool] < 1:
                     need(tool, 1, depth + 1)
@@ -39,33 +42,25 @@ def plan(inv, goals, crossed, bridged):
             else:
                 k = RECIPE_FOR[item]
                 rec = RECIPES[k]
-                while any(inv[j] < c for j, c in rec.inputs):
-                    for j, c in rec.inputs:
-                        need(j, c, depth + 1)
+                order = sorted(rec.inputs, key=lambda jc: -ITEM_DEPTH.get(jc[0], 0))
+                for j, c in order:
+                    need(j, c, depth + 1)
                 for j, c in rec.inputs:
                     inv[j] -= c
                 ops.append(("craft", k))
             inv[item] += 1
 
-    def ensure_crossed(depth):
-        if state["crossed"]:
-            return
-        if not state["bridged"]:
-            need(BRIDGE_ITEM, 1, depth + 1)
-            inv[BRIDGE_ITEM] -= 1
-            ops.append(("bridge",))
-            state["bridged"] = True
-        ops.append(("cross",))
-        state["crossed"] = True
-
-    # "Be east of the river" is about the final position, so pursue it last.
-    for g in sorted((g for g in goals if g >= 0), key=lambda g: GOALS[g].item == CROSS):
-        goal = GOALS[g]
-        if goal.item == CROSS:
-            ensure_crossed(0)
-        else:
-            need(goal.item, goal.count)
+    # deepest goal first (ties: later id first)
+    targets = items if items is not None else [(GOALS[g].item, GOALS[g].count) for g in
+                                               sorted((g for g in goals if g >= 0), key=lambda g: (-GOALS[g].depth, -g))]
+    for item, count in targets:
+        need(item, count)
     return ops
+
+
+ITEM_DEPTH = {}
+for _i in range(N_ITEMS):                   # ops from an empty inventory, in dependency order (inputs before outputs)
+    ITEM_DEPTH[_i] = _ops_from_nothing(_i)
 
 
 _PASS = PASSABLE.tolist()
@@ -126,46 +121,84 @@ def _adjacent_dir(grid, r, c, kind):
 
 
 @lru_cache(maxsize=1 << 16)
-def _first_op(inv, goals, crossed, bridged):
+def _first_op(inv, goals):
     """First op of plan() (cached: the same inventories and requests recur constantly)."""
-    ops = plan(np.array(inv), goals, crossed, bridged)
+    ops = plan(np.array(inv), goals)
     return ops[0] if ops else None
+
+
+def _craft_target(grid, pos, inv, cursor, slot, k):
+    """Craft op k: (action, None) if the agent can act where it stands, else (None, station cell type to walk to).
+    At the recipe's station: take back a slot that holds anything extra, put the first missing input (selecting it
+    first), craft when the slot holds exactly the inputs. A missing input that sits in another station's slot is
+    fetched from there (take)."""
+    st = RECIPES[k].station
+    si, need = STATION_INDEX[st], RECIPE_IN[k]
+    short = [j for j in np.nonzero(need)[0] if inv[j] + slot[si, j] < need[j]]     # inputs left in other slots
+    if short:
+        j = short[0]
+        t = next(STATIONS[u] for u in range(len(STATIONS)) if u != si and slot[u, j] > 0)
+        return (TAKE, None) if _adjacent_dir(grid, *pos, t) >= 0 else (None, t)
+    if _adjacent_dir(grid, *pos, st) < 0:
+        return None, st
+    c = slot[si]
+    if (c == need).all():
+        return CRAFT, None
+    if (c > need).any():
+        return TAKE, None
+    j = int(np.nonzero(c < need)[0][0])
+    return (PUT if cursor == j else SELECT), None
+
+
+def _stranded(slot):
+    """Station cell types whose slot holds something."""
+    return [STATIONS[u] for u in range(len(STATIONS)) if slot[u].any()]
+
+
+def _union_adjacent(grid, kinds):
+    m = np.zeros(grid.shape, bool)
+    for k in kinds:
+        m |= _adjacent_mask(grid, k)
+    return m
 
 
 def expert_action(env, b, goals, rng=None):
     """Next action of the expert in world b of `env` for the given goal ids."""
-    return expert_action_state(env.grid[b], env.pos[b], int(env.face[b]), env.inv[b], env.cfg.river_col, goals, rng)
+    return expert_action_state(env.grid[b], env.pos[b], int(env.face[b]), env.inv[b], int(env.cursor[b]),
+                               env.slot[b], goals, rng)
 
 
-def expert_action_state(grid, pos, face, inv, river, goals, rng=None):
+def expert_action_state(grid, pos, face, inv, cursor, slot, goals, rng=None):
     """expert_action from the raw state of one world (picklable inputs, for parallel labelling)."""
     pos = (int(pos[0]), int(pos[1]))
-    crossed = pos[1] > river
-    bridged = bool((grid[:, river] == BRIDGE).any())
-    op = _first_op(tuple(inv.tolist()), tuple(int(g) for g in goals), crossed, bridged)
-    if op is None:                                        # plan complete: declare done
+    op = _first_op(tuple((inv + slot.sum(0)).tolist()), tuple(int(g) for g in goals))
+    left = _stranded(slot) if op is None or op[0] != "craft" else []
+    if left:                                              # goal items / tools left in a slot: take them back first
+        if any(_adjacent_dir(grid, *pos, k) >= 0 for k in left):
+            return TAKE
+        step = _bfs_first_step(grid, pos, _union_adjacent(grid, left))
+    elif op is None:                                      # plan complete: declare done
         return DONE
-    if op[0] == "craft":
-        rec = RECIPES[op[1]]
-        if rec.station < 0 or _adjacent_dir(grid, *pos, rec.station) >= 0:
-            return CRAFT0 + op[1]
-        step = _bfs_first_step(grid, pos, _adjacent_mask(grid, rec.station))
-    elif op[0] in ("collect", "bridge"):
-        kind = WATER if op[0] == "bridge" else op[1]
+    elif op[0] == "craft":
+        a, walk_to = _craft_target(grid, pos, inv, cursor, slot, op[1])
+        if a is not None:
+            return a
+        step = _bfs_first_step(grid, pos, _adjacent_mask(grid, walk_to))
+    else:
+        kind = op[1]
         d = _adjacent_dir(grid, *pos, kind)
         if d >= 0:
             return USE if face == d else d                     # moving into a non-passable cell only turns
         step = _bfs_first_step(grid, pos, _adjacent_mask(grid, kind))
-    else:  # cross
-        step = _bfs_first_step(grid, pos, np.broadcast_to(np.arange(grid.shape[1]) > river, grid.shape))
-    if step is None or step < 0:
-        return int(rng.integers(N_WORLD_ACTIONS)) if rng is not None else 0
+    if step is None or step < 0:                          # nothing reachable (resource exhausted): give up
+        return int(rng.integers(N_WORLD_ACTIONS)) if rng is not None else DONE
     return step
 
 
 def _label_chunk(args):
-    grid, pos, face, inv, river, goals = args
-    return [expert_action_state(grid[i], pos[i], int(face[i]), inv[i], river, goals[i]) for i in range(len(grid))]
+    grid, pos, face, inv, cursor, slot, goals = args
+    return [expert_action_state(grid[i], pos[i], int(face[i]), inv[i], int(cursor[i]), slot[i], goals[i])
+            for i in range(len(grid))]
 
 
 def available_cpus():
@@ -202,7 +235,7 @@ class ExpertPool:
         if len(idx) == 0:
             return out
         chunks = [c for c in np.array_split(idx, min(len(idx), 4 * self.workers)) if len(c)]
-        args = [(env.grid[c], env.pos[c], env.face[c], env.inv[c], env.cfg.river_col, goals[c]) for c in chunks]
+        args = [(env.grid[c], env.pos[c], env.face[c], env.inv[c], env.cursor[c], env.slot[c], goals[c]) for c in chunks]
         res = self.pool.map(_label_chunk, args) if self.pool else [_label_chunk(x) for x in args]
         out[np.concatenate(chunks)] = np.concatenate([np.asarray(r, dtype=np.int64) for r in res])
         return out
@@ -244,37 +277,31 @@ def _bfs_first_step_reference(grid, start, is_goal):
     return None
 
 
-def _adjacent_target_reference(grid, r, c, kind):
-    """Direction (0-3) from (r, c) to an adjacent cell of type `kind`, or -1."""
-    for d, (dr, dc) in enumerate(DIRS):
-        if grid[r + dr, c + dc] == kind:
-            return d
-    return -1
-
-
 def expert_action_reference(env, b, goals, rng=None):
-    """Original per-cell implementation of expert_action, kept to test the fast one against."""
+    """Per-cell implementation of expert_action, kept to test the fast one against."""
     grid, pos, face = env.grid[b], tuple(env.pos[b]), int(env.face[b])
-    river = env.cfg.river_col
-    crossed = pos[1] > river
-    bridged = bool((grid[:, river] == BRIDGE).any())
-    ops = plan(env.inv[b], goals, crossed, bridged)
+    ops = plan(env.inv[b] + env.slot[b].sum(0), goals)
+    left = _stranded(env.slot[b]) if not ops or ops[0][0] != "craft" else []
+    if left:                                              # goal items / tools left in a slot: take them back first
+        if any(_adjacent_dir(grid, *pos, k) >= 0 for k in left):
+            return TAKE
+        step = _bfs_first_step_reference(grid, pos, lambda r, c: any(_adjacent_dir(grid, r, c, k) >= 0 for k in left))
+        if step is None or step < 0:
+            return int(rng.integers(N_WORLD_ACTIONS)) if rng is not None else DONE
+        return step
     if not ops:                                           # plan complete: declare done
         return DONE
     op = ops[0]
     if op[0] == "craft":
-        rec = RECIPES[op[1]]
-        if rec.station < 0 or _adjacent_target_reference(grid, *pos, rec.station) >= 0:
-            return CRAFT0 + op[1]
-        step = _bfs_first_step_reference(grid, pos, lambda r, c: _adjacent_target_reference(grid, r, c, rec.station) >= 0)
-    elif op[0] in ("collect", "bridge"):
-        kind = WATER if op[0] == "bridge" else op[1]
-        d = _adjacent_target_reference(grid, *pos, kind)
+        a, kind = _craft_target(grid, pos, env.inv[b], int(env.cursor[b]), env.slot[b], op[1])
+        if a is not None:
+            return a
+    else:
+        kind = op[1]
+        d = _adjacent_dir(grid, *pos, kind)
         if d >= 0:
-            return USE if face == d else d                     # moving into a non-passable cell only turns
-        step = _bfs_first_step_reference(grid, pos, lambda r, c: _adjacent_target_reference(grid, r, c, kind) >= 0)
-    else:  # cross
-        step = _bfs_first_step_reference(grid, pos, lambda r, c: c > river)
+            return USE if face == d else d
+    step = _bfs_first_step_reference(grid, pos, lambda r, c: _adjacent_dir(grid, r, c, kind) >= 0)
     if step is None or step < 0:
-        return int(rng.integers(N_WORLD_ACTIONS)) if rng is not None else 0
+        return int(rng.integers(N_WORLD_ACTIONS)) if rng is not None else DONE
     return step

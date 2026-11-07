@@ -33,7 +33,10 @@ def finished(args):
         return False
     toks = shlex.split(args)
     if "--budget" in toks and "--phase2" not in toks and r.get("evals"):
-        return r["evals"][-1]["episodes"] >= int(toks[toks.index("--budget") + 1])
+        unit = toks[toks.index("--budget-unit") + 1] if "--budget-unit" in toks else "episodes"
+        spent = r["evals"][-1]["teacher_calls" if unit == "feedbacks" and "--arm" in toks and
+                                toks[toks.index("--arm") + 1] != "ppo" else "episodes"]
+        return spent >= int(toks[toks.index("--budget") + 1])
     return True
 
 
